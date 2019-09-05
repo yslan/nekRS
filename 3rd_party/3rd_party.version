@@ -22,6 +22,10 @@ LIBP_GIT_URL=https://gitlab.com/nekrs/libparanumal.git
 HYPRE_VER=2.17.0
 HYPRE_ARCHIVE_URL=https://github.com/hypre-space/hypre/archive/v${HYPRE_VER}.tar.gz
 
+function clone_my_nek() {
+  rm -rf nek5000
+  git clone --single-branch --branch addTimer https://github.com/yslan/nek5000
+}
 function clone_nek() {
   NEK_TAR=${NEKRS_SRC_THIRD_PARTY_DIR}/nek5000.tgz
   # clone nek5000

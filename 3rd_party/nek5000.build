@@ -4,7 +4,8 @@ set -x -e
 source ${NEKRS_SRC_THIRD_PARTY_DIR}/3rd_party.version
 
 if [ ! -d nek5000 ]; then
-  clone_nek
+#  clone_nek
+  clone_my_nek
 fi
 
 echo "Downloading gslib ..."
