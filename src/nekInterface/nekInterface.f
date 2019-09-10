@@ -213,6 +213,7 @@ c
       ntdump=0
 
       call setics
+      call usrdat4
 
       call dofcnt
 
