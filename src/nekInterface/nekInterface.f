@@ -213,7 +213,10 @@ c
       ntdump=0
 
       call setics
+
+      if(nio.eq.0) write(6,*) 'call usrdat4'
       call usrdat4
+      if(nio.eq.0) write(6,'(A,/)') ' done :: usrdat4'
 
       call dofcnt
 
@@ -249,7 +252,7 @@ c-----------------------------------------------------------------------
       call blank(initc(1),132)
       call chcopy(initc(1),rfile,l)
       call setics()
-
+      call usrdat5
       getu = 0
       getp = 0
       if(ifgetu) getu = 1
