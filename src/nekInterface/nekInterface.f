@@ -234,8 +234,13 @@ c-----------------------------------------------------------------------
 
       common /scrcg/ pm1(lx1,ly1,lz1,lelv)
 
+      if(nio.eq.0) write(*,*)'call usrdat6'
+      call usrdat6 
+      if(nio.eq.0) write(*,*)'call usrdat6 done !! '
       call copy(pm1,pr,nx1*ny1*nz1*nelv)
       call outfld('   ')
+      ifto=.false.
+      ifheat=.false.
 
       return
       end

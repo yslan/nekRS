@@ -8,6 +8,9 @@ nekdata_private nekData;
 static void (*usrdat_ptr)(void);
 static void (*usrdat2_ptr)(void);
 static void (*usrdat3_ptr)(void);
+static void (*usrdat4_ptr)(void);
+static void (*usrdat5_ptr)(void);
+static void (*usrdat6_ptr)(void);
 static void (*userchk_ptr)(void); 
 static void (*uservp_ptr)(void); 
 static void (*userf_ptr)(void); 
@@ -105,6 +108,9 @@ int nek_lglel(int e)
 DEFINE_USER_FUNC(usrdat)
 DEFINE_USER_FUNC(usrdat2)
 DEFINE_USER_FUNC(usrdat3)
+DEFINE_USER_FUNC(usrdat4)
+DEFINE_USER_FUNC(usrdat5)
+DEFINE_USER_FUNC(usrdat6)
 DEFINE_USER_FUNC(userchk)
 DEFINE_USER_FUNC(uservp)
 DEFINE_USER_FUNC(userf)
@@ -148,6 +154,12 @@ void set_function_handles(char *session_in,int verbose) {
   usrdat2_ptr = (void (*)(void)) dlsym(handle, fname("usrdat2"));
   check_error(dlerror());
   usrdat3_ptr = (void (*)(void)) dlsym(handle, fname("usrdat3"));
+  check_error(dlerror());
+  usrdat4_ptr = (void (*)(void)) dlsym(handle, fname("usrdat4"));
+  check_error(dlerror());
+  usrdat5_ptr = (void (*)(void)) dlsym(handle, fname("usrdat5"));
+  check_error(dlerror());
+  usrdat6_ptr = (void (*)(void)) dlsym(handle, fname("usrdat6"));
   check_error(dlerror());
   userchk_ptr = (void (*)(void)) dlsym(handle, fname("userchk"));
   check_error(dlerror());
