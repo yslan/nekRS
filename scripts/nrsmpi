@@ -1,8 +1,21 @@
 #!/bin/bash
 
+unset "${!NEKRS@}"
+unset "${!OCCA@}"
+
+export NEKRS_INSTALL_DIR=${HOME}/.local_yslan/nekrs_yslan
+source ${NEKRS_INSTALL_DIR}/bin/nekrs.bashrc
+bin=${NEKRS_INSTALL_DIR}/bin/nekrs
+
 if [ $# -eq 0 ] || [ $# -ne 2 ] || [ "$1" == "-h" ] || [ "$1" == "-help" ]; then
   echo "usage: ${0##*/} <casename> <#procs>"
   exit 0
 fi
 
-mpirun -np $2 nekrs --setup $1
+cmd="mpirun -np "$2" "$bin" --setup "$1
+echo $cmd
+echo $cmd > qq
+echo $NEKRS_INSTALL_DIR >> qq
+echo $bin >> qq
+$cmd
+
