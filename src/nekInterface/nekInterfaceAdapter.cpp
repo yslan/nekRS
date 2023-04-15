@@ -788,9 +788,11 @@ int setup(nrs_t* nrs_in)
   }
 
   int isTMesh = 0;
-  nekData.NboundaryID  = (*nek_nbid_ptr)(&isTMesh);
+//  nekData.NboundaryID  = (*nek_nbid_ptr)(&isTMesh);
+  nekData.NboundaryID = 3;
   isTMesh = 1;
-  nekData.NboundaryIDt = (*nek_nbid_ptr)(&isTMesh);
+//  nekData.NboundaryIDt = (*nek_nbid_ptr)(&isTMesh);
+  nekData.NboundaryIDt = 3;
 
   dfloat startTime;
   options->getArgs("START TIME", startTime);

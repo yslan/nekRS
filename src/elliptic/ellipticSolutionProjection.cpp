@@ -186,9 +186,17 @@ SolutionProjection::SolutionProjection(elliptic_t &elliptic,
 
   o_alpha = platform->device.malloc(maxNumVecsProjection, sizeof(dfloat));
   o_xbar = platform->device.malloc(Nfields * fieldOffset, sizeof(dfloat));
+/*
   o_xx = platform->device.malloc(Nfields * fieldOffset * maxNumVecsProjection, sizeof(dfloat));
   o_bb = platform->device.malloc(
     (type == ProjectionType::CLASSIC) ? Nfields * fieldOffset * maxNumVecsProjection :
+    Nfields * fieldOffset
+    , sizeof(dfloat));
+*/
+  // Lan 04/13/23, fix overflow...
+  o_xx = platform->device.malloc((Nfields * maxNumVecsProjection) * fieldOffset, sizeof(dfloat));
+  o_bb = platform->device.malloc(
+    (type == ProjectionType::CLASSIC) ? (Nfields * maxNumVecsProjection) * fieldOffset:
     Nfields * fieldOffset
     , sizeof(dfloat));
 
