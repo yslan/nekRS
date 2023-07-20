@@ -1,6 +1,6 @@
 #include "nrs.hpp"
 #include "mesh.h"
-void meshSolve(nrs_t* nrs, dfloat time, occa::memory o_U, int stage)
+void meshSolve(nrs_t* nrs, dfloat time, occa::memory o_U, int stage, int tstep)
 {
   mesh_t *mesh = nrs->_mesh;
   linAlg_t* linAlg = platform->linAlg;
@@ -26,7 +26,7 @@ void meshSolve(nrs_t* nrs, dfloat time, occa::memory o_U, int stage)
         platform->options.compareArgs("MESH INITIAL GUESS", "EXTRAPOLATION") && stage == 1 ? mesh->o_Ue
                                                                                            : mesh->o_U;
     platform->o_mempool.slice0.copyFrom(o_U0, nrs->NVfields * nrs->fieldOffset * sizeof(dfloat));
-    ellipticSolve(nrs->meshSolver, platform->o_mempool.slice3, platform->o_mempool.slice0);
+    ellipticSolve(nrs->meshSolver, platform->o_mempool.slice3, platform->o_mempool.slice0, tstep);
     return platform->o_mempool.slice0;
   }(nrs, time, stage);
 

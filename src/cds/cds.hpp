@@ -125,6 +125,6 @@ struct cds_t
   occa::properties* kernelInfo;
 };
 
-occa::memory cdsSolve(int i, cds_t* cds, dfloat time, int stage);
+occa::memory cdsSolve(int i, cds_t* cds, dfloat time, int stage, int tstep);
 
 #endif

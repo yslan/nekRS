@@ -188,7 +188,7 @@ void ellipticPreconditioner(elliptic_t* elliptic, occa::memory &o_r, occa::memor
 void ellipticPreconditionerSetup(elliptic_t* elliptic, ogs_t* ogs);
 void ellipticBuildPreconditionerKernels(elliptic_t* elliptic);
 
-void ellipticSolve(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x);
+void ellipticSolve(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x, int tstep);
 
 void ellipticSolveSetup(elliptic_t* elliptic);
 
@@ -200,7 +200,7 @@ int pgmres(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
         const dfloat tol, const int MAXIT, dfloat &res);
 
 int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
-        const dfloat tol, const int MAXIT, dfloat &res);
+        const dfloat tol, const int MAXIT, dfloat &res, dfloat &dmin, dfloat &dmax);
 /*
 int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
         const dfloat tol, const int MAXIT, dfloat &res);*/

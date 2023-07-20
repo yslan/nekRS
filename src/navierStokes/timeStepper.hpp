@@ -26,7 +26,7 @@ occa::memory scalarStrongSubCycleMovingMesh(cds_t *cds, int nEXT, dfloat time,
 occa::memory scalarStrongSubCycle(cds_t *cds, int nEXT, dfloat time, int is,
                                   occa::memory o_U, occa::memory o_S);
 void scalarSolveCvode(nrs_t *nrs, dfloat tn, dfloat time, occa::memory o_S, int stage, int tstep);
-void scalarSolve(nrs_t *nrs, dfloat time, occa::memory o_S, int stage);
+void scalarSolve(nrs_t *nrs, dfloat time, occa::memory o_S, int stage, int tstep);
 void printInfo(nrs_t *nrs, dfloat time, int tstep, bool printStepInfo, bool printVerboseInfo);
 }
 

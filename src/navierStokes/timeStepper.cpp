@@ -398,7 +398,7 @@ bool runStep(nrs_t *nrs, std::function<bool(int)> convergenceCheck, int stage)
   applyDirichlet(nrs, timeNew);
 
   if (nrs->Nscalar)
-    scalarSolve(nrs, timeNew, cds->o_S, stage);
+    scalarSolve(nrs, timeNew, cds->o_S, stage, tstep);
   
   if(udf.postScalar)
     udf.postScalar(nrs, timeNew, tstep);
@@ -419,7 +419,7 @@ bool runStep(nrs_t *nrs, std::function<bool(int)> convergenceCheck, int stage)
     fluidSolve(nrs, timeNew, nrs->o_P, nrs->o_U, stage, tstep);
 
   if (!platform->options.compareArgs("MESH SOLVER", "NONE"))
-    meshSolve(nrs, timeNew, nrs->meshV->o_U, stage);
+    meshSolve(nrs, timeNew, nrs->meshV->o_U, stage, tstep);
 
   nrs->timeStepConverged = convergenceCheck(stage);
 
@@ -612,7 +612,7 @@ void makeq(nrs_t *nrs, dfloat time, int tstep, occa::memory o_FS, occa::memory o
   }
 }
 
-void scalarSolve(nrs_t *nrs, dfloat time, occa::memory o_S, int stage)
+void scalarSolve(nrs_t *nrs, dfloat time, occa::memory o_S, int stage, int tstep)
 {
   cds_t *cds = nrs->cds;
 
@@ -638,7 +638,7 @@ void scalarSolve(nrs_t *nrs, dfloat time, occa::memory o_S, int stage)
                                 cds->o_BFDiag,
                                 cds->o_ellipticCoeff);
 
-    occa::memory o_Snew = cdsSolve(is, cds, time, stage);
+    occa::memory o_Snew = cdsSolve(is, cds, time, stage, tstep);
     o_Snew.copyTo(o_S, cds->fieldOffset[is] * sizeof(dfloat), cds->fieldOffsetScan[is] * sizeof(dfloat));
   }
   platform->timer.toc("scalarSolve");
@@ -768,7 +768,7 @@ void fluidSolve(nrs_t *nrs, dfloat time, occa::memory o_P, occa::memory o_U, int
 
   platform->timer.tic("pressureSolve", 1);
   nrs->setEllipticCoeffPressureKernel(mesh->Nlocal, nrs->fieldOffset, nrs->o_rho, nrs->o_ellipticCoeff);
-  occa::memory o_Pnew = tombo::pressureSolve(nrs, time, stage);
+  occa::memory o_Pnew = tombo::pressureSolve(nrs, time, stage, tstep);
   o_P.copyFrom(o_Pnew, nrs->fieldOffset * sizeof(dfloat));
   platform->timer.toc("pressureSolve");
 
@@ -783,7 +783,7 @@ void fluidSolve(nrs_t *nrs, dfloat time, occa::memory o_P, occa::memory o_U, int
                               o_NULL,
                               nrs->o_ellipticCoeff);
 
-  occa::memory o_Unew = tombo::velocitySolve(nrs, time, stage);
+  occa::memory o_Unew = tombo::velocitySolve(nrs, time, stage, tstep);
   o_U.copyFrom(o_Unew, nrs->NVfields * nrs->fieldOffset * sizeof(dfloat));
 
   platform->timer.toc("velocitySolve");

@@ -2,7 +2,7 @@
 #include "nrs.hpp"
 #include "linAlg.hpp"
 
-occa::memory cdsSolve(const int is, cds_t* cds, dfloat time, int stage)
+occa::memory cdsSolve(const int is, cds_t* cds, dfloat time, int stage, int tstep)
 {
   std::string sid = scalarDigitStr(is);
 
@@ -43,7 +43,7 @@ occa::memory cdsSolve(const int is, cds_t* cds, dfloat time, int stage)
           : cds->o_S.slice(cds->fieldOffsetScan[is] * sizeof(dfloat), cds->fieldOffset[is] * sizeof(dfloat));
   platform->o_mempool.slice0.copyFrom(o_S0, mesh->Nlocal * sizeof(dfloat));
   auto o_BF_i = cds->o_BF.slice(cds->fieldOffsetScan[is] * sizeof(dfloat), cds->fieldOffset[is] * sizeof(dfloat));
-  ellipticSolve(cds->solver[is], o_BF_i, platform->o_mempool.slice0);
+  ellipticSolve(cds->solver[is], o_BF_i, platform->o_mempool.slice0, tstep);
 
   return platform->o_mempool.slice0;
 }

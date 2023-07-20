@@ -29,7 +29,7 @@
 #include "platform.hpp"
 #include "linAlg.hpp"
 
-void ellipticSolve(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x)
+void ellipticSolve(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x, int tstep)
 {
   ellipticUpdateWorkspace(elliptic); // in case o_wrk has changed
 
@@ -154,8 +154,9 @@ void ellipticSolve(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x)
     } else if(options.compareArgs("SOLVER", "PGMRES")) {
       elliptic->Niter = pgmres (elliptic, o_r, o_x, tol, maxIter, elliptic->resNorm);
     } else if(options.compareArgs("SOLVER", "CHEBYSHEV")) {
-      elliptic->Niter = pcg_eigen (elliptic, o_r, o_x, tol, maxIter, elliptic->resNorm);
-//      elliptic->Niter = cebyshev_aux (elliptic, o_r, o_x, tol, maxIter, elliptic->resNorm);
+      dfloat dmin, dmax;
+      elliptic->Niter = pcg_eigen (elliptic, o_r, o_x, tol, maxIter, elliptic->resNorm, dmin, dmax);
+//      elliptic->Niter = cebyshev_aux (elliptic, o_r, o_x, tol, maxIter, elliptic->resNorm, tstep);
     } else {
       nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
                "Linear solver %s is not supported!\n", options.getArgs("SOLVER").c_str());

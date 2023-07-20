@@ -47,7 +47,7 @@ int fromBID;
 int toBID;
 dfloat flowDirection[3];
 
-void compute(nrs_t *nrs, dfloat time) {
+void compute(nrs_t *nrs, dfloat time, int tstep) {
 
   constexpr int ndim = 3;
   mesh_t *mesh = nrs->meshV;
@@ -84,7 +84,7 @@ void compute(nrs_t *nrs, dfloat time) {
   platform->timer.toc("pressure rhs");
 
   platform->timer.tic("pressureSolve", 1);
-  ellipticSolve(nrs->pSolver, o_Prhs, nrs->o_Pc);
+  ellipticSolve(nrs->pSolver, o_Prhs, nrs->o_Pc, 0);
   platform->timer.toc("pressureSolve");
 
   // solve homogenous Stokes problem
@@ -139,14 +139,14 @@ void compute(nrs_t *nrs, dfloat time) {
       nrs->o_ellipticCoeff);
 
   if (nrs->uvwSolver) {
-    ellipticSolve(nrs->uvwSolver, o_RhsVel, nrs->o_Uc);
+    ellipticSolve(nrs->uvwSolver, o_RhsVel, nrs->o_Uc, tstep);
   } else {
     occa::memory o_Ucx = nrs->o_Uc + (0 * sizeof(dfloat)) * nrs->fieldOffset;
     occa::memory o_Ucy = nrs->o_Uc + (1 * sizeof(dfloat)) * nrs->fieldOffset;
     occa::memory o_Ucz = nrs->o_Uc + (2 * sizeof(dfloat)) * nrs->fieldOffset;
-    ellipticSolve(nrs->uSolver, platform->o_mempool.slice0, o_Ucx);
-    ellipticSolve(nrs->vSolver, platform->o_mempool.slice1, o_Ucy);
-    ellipticSolve(nrs->wSolver, platform->o_mempool.slice2, o_Ucz);
+    ellipticSolve(nrs->uSolver, platform->o_mempool.slice0, o_Ucx, tstep);
+    ellipticSolve(nrs->vSolver, platform->o_mempool.slice1, o_Ucy, tstep);
+    ellipticSolve(nrs->wSolver, platform->o_mempool.slice2, o_Ucz, tstep);
   }
   platform->timer.toc("velocitySolve");
 
@@ -378,7 +378,7 @@ bool adjust(nrs_t *nrs, int tstep, dfloat time) {
     res0NormP = nrs->pSolver->res0Norm;
     resNormP = nrs->pSolver->resNorm;
 
-    compute(nrs, time);
+    compute(nrs, time, tstep);
 
     if(nrs->uvwSolver){
       nrs->uvwSolver->Niter += NiterUVW;

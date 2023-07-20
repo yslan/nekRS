@@ -40,7 +40,7 @@ static dfloat f77sgn(dfloat val1, dfloat val2) { // return val1 with sign of val
 // Solve eigenvalue of tri-diagonal matrix
 // copied from subroutine calc (diag,upper,d,e,n,dmax,dmin) (Nek5000/core/hmholtz.f)
 // TODO: we can call it directly via nekInterface?
-static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat *dminmax)
+static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat &dmin, dfloat &dmax)
 {
 
   dfloat* d = (dfloat *) calloc(n, sizeof(dfloat));
@@ -50,7 +50,7 @@ static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat *dminma
   memcpy(e, upper, n*sizeof(dfloat));
 
   uint l,m,i,iter;
-  dfloat dd,g,r,s,c,p,b,f,dmin,dmax;
+  dfloat dd,g,r,s,c,p,b,f;
   // TODO: change index to 0-base
   uint iskip = 0; // FIXME: this is odd..
   for (l=1;l<=n;l++) {
@@ -118,9 +118,6 @@ static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat *dminma
     dmax = std::abs(std::max(d[i-1],dmax));
     dmin = std::abs(std::min(d[i-1],dmin));
   }
-
-  dminmax[0] = dmin;
-  dminmax[1] = dmax;
 }
 
 static dfloat update(elliptic_t* elliptic,
@@ -176,7 +173,7 @@ static dfloat update(elliptic_t* elliptic,
 }
 
 int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
-        const dfloat tol, const int MAXIT, dfloat &rdotr)
+        const dfloat tol, const int MAXIT, dfloat &rdotr, dfloat &dmin, dfloat &dmax)
 {
   
   mesh_t* mesh = elliptic->mesh;
@@ -306,11 +303,9 @@ int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
   while (rdotr > tol && iter < MAXIT);
 
   if (iter>=3) {
-    calc_eigen(diagt,upper,iter,dminmax);
-    if (verbose && (platform->comm.mpiRank == 0))
-      printf("dmin %.15e dmax %.15e \n", dminmax[0],dminmax[1]);
+    calc_eigen(diagt,upper,iter,dmin,dmax);
     if (platform->comm.mpiRank == 0)
-      printf("lambda: dmin %.15e dmax %.15e \n", dminmax[0],dminmax[1]);
+      printf("lambda: dmin %.15e dmax %.15e \n", dmin,dmax);
   }
 
   return iter;

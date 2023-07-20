@@ -245,7 +245,7 @@ void parallelSort(int size, int rank, MPI_Comm comm,
                   void (* match)(void*, void*)
                   );
 
-void meshSolve(nrs_t* nrs, dfloat time, occa::memory o_U, int stage);
+void meshSolve(nrs_t* nrs, dfloat time, occa::memory o_U, int stage, int tstep);
 
 /* dimension independent mesh operations */
 void meshConnect(mesh_t* mesh);
