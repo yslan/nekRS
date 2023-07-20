@@ -1119,6 +1119,10 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
       {"pgmres"},
       {"pcg"},
       {"block"},
+      {"chebyshev"},
+      {"start"},
+      {"iter"},
+      {"extra"},
   };
   std::vector<std::string> list = serializeString(p_solver, '+');
   for (const std::string s : list) {
@@ -1156,6 +1160,44 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
     }
     else {
       p_solver = "PCG";
+    }
+  }
+  else if (p_solver.find("chebyshev") != std::string::npos) { // TODO: new
+    std::vector<std::string> list;
+    list = serializeString(p_solver, '+');
+    std::string n = "10";
+    std::string m = "20";
+    for (std::string s : list) {
+      const auto nvectorStr1 = parseValueForKey(s, "start");
+      if (!nvectorStr1.empty()) {
+        n = nvectorStr1;
+      }
+      const auto nvectorStr2 = parseValueForKey(s, "iter");
+      if (!nvectorStr2.empty()) {
+        m = nvectorStr2;
+      }
+    }
+    options.setArgs(parSectionName + "CHEBYSHEV START", n);
+    options.setArgs(parSectionName + "CHEBYSHEV ITER", m);
+
+
+    if (p_solver.find("block") != std::string::npos) {
+      options.setArgs(parSectionName + "BLOCK SOLVER", "TRUE");
+    }
+    else {
+      options.setArgs(parSectionName + "BLOCK SOLVER", "FALSE");
+    }
+    if (p_solver.find("fcg") != std::string::npos || p_solver.find("flexible") != std::string::npos) {
+      p_solver = "CHEBYSHEV+FLEXIBLE"; // TODO: need test
+    }
+    else {
+      p_solver = "CHEBYSHEV";
+    }    
+    if (p_solver.find("extra") != std::string::npos) {
+      options.setArgs(parSectionName + "CHEBYSHEV EXTRA", "TRUE");
+    }
+    else {
+      options.setArgs(parSectionName + "CHEBYSHEV EXTRA", "FALSE");
     }
   }
   else if (p_solver.find("user") != std::string::npos) {

@@ -153,7 +153,10 @@ void ellipticSolve(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x)
       elliptic->Niter = pcg (elliptic, o_r, o_x, tol, maxIter, elliptic->resNorm);
     } else if(options.compareArgs("SOLVER", "PGMRES")) {
       elliptic->Niter = pgmres (elliptic, o_r, o_x, tol, maxIter, elliptic->resNorm);
-    } else{
+    } else if(options.compareArgs("SOLVER", "CHEBYSHEV")) {
+      elliptic->Niter = pcg_eigen (elliptic, o_r, o_x, tol, maxIter, elliptic->resNorm);
+//      elliptic->Niter = cebyshev_aux (elliptic, o_r, o_x, tol, maxIter, elliptic->resNorm);
+    } else {
       nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
                "Linear solver %s is not supported!\n", options.getArgs("SOLVER").c_str());
     }
