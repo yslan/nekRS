@@ -1187,18 +1187,18 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
     else {
       options.setArgs(parSectionName + "BLOCK SOLVER", "FALSE");
     }
-    if (p_solver.find("fcg") != std::string::npos || p_solver.find("flexible") != std::string::npos) {
-      p_solver = "CHEBYSHEV+FLEXIBLE"; // TODO: need test
-    }
-    else {
-      p_solver = "CHEBYSHEV";
-    }    
     if (p_solver.find("extra") != std::string::npos) {
       options.setArgs(parSectionName + "CHEBYSHEV EXTRA", "TRUE");
     }
     else {
       options.setArgs(parSectionName + "CHEBYSHEV EXTRA", "FALSE");
     }
+    if (p_solver.find("fcg") != std::string::npos || p_solver.find("flexible") != std::string::npos) {
+      p_solver = "CHEBYSHEV+FLEXIBLE"; // TODO: need test
+    }
+    else {
+      p_solver = "CHEBYSHEV";
+    }    
   }
   else if (p_solver.find("user") != std::string::npos) {
     p_solver = "USER";

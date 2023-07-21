@@ -201,9 +201,9 @@ int pgmres(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
 
 int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
         const dfloat tol, const int MAXIT, dfloat &res, dfloat &dmin, dfloat &dmax);
-/*
+
 int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
-        const dfloat tol, const int MAXIT, dfloat &res);*/
+        const dfloat tol, const int MAXIT, dfloat &res, const int tstep);
 
 void ellipticOperator(elliptic_t* elliptic,
                       occa::memory &o_q,

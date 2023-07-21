@@ -3,6 +3,8 @@ set(ELLIPTIC_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/solvers/elliptic)
 set(ELLIPTIC_SOURCES
         ${ELLIPTIC_SOURCE_DIR}/linearSolver/PCG.cpp
         ${ELLIPTIC_SOURCE_DIR}/linearSolver/PGMRES.cpp
+        ${ELLIPTIC_SOURCE_DIR}/linearSolver/PCG_EIGEN.cpp
+        ${ELLIPTIC_SOURCE_DIR}/linearSolver/CHEBYSHEV.cpp
         ${ELLIPTIC_SOURCE_DIR}/amgSolver/amgx/AMGX.cpp
         ${ELLIPTIC_SOURCE_DIR}/ellipticApplyMask.cpp
         ${ELLIPTIC_SOURCE_DIR}/ellipticUpdateJacobi.cpp
