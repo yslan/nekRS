@@ -42,6 +42,7 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
 
   mesh_t* mesh = elliptic->mesh;
   setupAide& options = elliptic->options;
+  const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
 
   const dfloat theta = 0.5 * (dmax + dmin);
   const dfloat delta = 0.5 * (dmax - dmin);
@@ -55,14 +56,12 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
   const int Nfields = elliptic->Nfields;
   const dlong offset = elliptic->fieldOffset;
 
-
   occa::memory &o_d = elliptic->o_p;
   occa::memory &o_z = elliptic->o_z;
   occa::memory &o_Ap = elliptic->o_Ap;
-#ifdef DEBUG
   occa::memory &o_weight = elliptic->o_invDegree;
   dfloat resNormFactor = elliptic->resNormFactor;
-#endif
+  dfloat rdotr;
 
   // r = S(r-Ax)
   ellipticOperator(elliptic, o_x, o_Ap, dfloatString); // Ap = A x
@@ -73,15 +72,15 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
     platform->linAlg->axpbyMany(Nlocal, Nfields, offset, mone, o_Ap, one, o_r); // r = r - Ax
   }
 
-#ifdef DEBUG
-  dfloat rdotr = platform->linAlg->weightedNorm2Many(
-        Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
-      * sqrt(resNormFactor);
-  if (platform->comm.mpiRank == 0) {
-    printf("%s Chebyshev dbgdbg:  iter %d rdotr %.6e\n"
-          ,elliptic->name.c_str(),0,rdotr);
+  // Only compute norm in verbose mode
+  if (verbose) {
+    rdotr = platform->linAlg->weightedNorm2Many(
+          Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
+        * sqrt(resNormFactor);
+    if (platform->comm.mpiRank == 0) {
+      printf("it %d r norm %.8e \n",0,rdotr);
+    }
   }
-#endif
   
   // d = invTheta*res
   // d = 0 * d + invTheta * r
@@ -101,15 +100,15 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
     }
     platform->linAlg->axpbyMany(Nlocal, Nfields, offset, mone, o_z, one, o_r); // r = r - z
 
-#ifdef DEBUG
-    rdotr = platform->linAlg->weightedNorm2Many(
-         Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
-       * sqrt(resNormFactor);
-    if (platform->comm.mpiRank == 0) {
-      printf("%s Chebyshev dbgdbg:  iter %d rdotr %.6e \n"
-            ,elliptic->name.c_str(),k,rdotr);
+    // Only compute norm in verbose mode
+    if (verbose) {
+      rdotr = platform->linAlg->weightedNorm2Many(
+           Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
+         * sqrt(resNormFactor);
+      if (platform->comm.mpiRank == 0) {
+        printf("it %d r norm %.8e \n",k,rdotr);
+      }
     }
-#endif
 
     const dfloat rho = 1.0 / (2.0 * sigma - rho_prev);
     const dfloat rCoeff = 2.0 * rho / delta;

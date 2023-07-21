@@ -179,7 +179,7 @@ int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
   mesh_t* mesh = elliptic->mesh;
   setupAide& options = elliptic->options;
 
-  const int flexible = options.compareArgs("SOLVER", "FLEXIBLE");
+  const int flexible = options.compareArgs("SOLVER", "FLEXIBLE"); // TODO: does this work with fcg?
   const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
   const int fixedIteration = false;
 
@@ -304,8 +304,8 @@ int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
 
   if (iter>=3) {
     calc_eigen(diagt,upper,iter,dmin,dmax);
-    if (platform->comm.mpiRank == 0)
-      printf("lambda: dmin %.15e dmax %.15e \n", dmin,dmax);
+    if (verbose && platform->comm.mpiRank == 0)
+      printf("%s PCG eigen: dmin %.8e dmax %.8e \n", elliptic->name.c_str(),dmin,dmax);
   }
 
   return iter;
