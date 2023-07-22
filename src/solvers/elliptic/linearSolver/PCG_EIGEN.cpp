@@ -42,83 +42,108 @@ static dfloat f77sgn(dfloat val1, dfloat val2) { // return val1 with sign of val
 // TODO: we can call it directly via nekInterface?
 static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat &dmin, dfloat &dmax)
 {
+  // Rayleight-quotient with QR iter and Wilkinson's shift
 
+  const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
   dfloat* d = (dfloat *) calloc(n, sizeof(dfloat));
   dfloat* e = (dfloat *) calloc(n, sizeof(dfloat));
 
   memcpy(d, diagt, n*sizeof(dfloat));
   memcpy(e, upper, n*sizeof(dfloat));
 
-  uint l,m,i,iter;
-  dfloat dd,g,r,s,c,p,b,f;
+  uint l,m,i,iter,m_in,iskip;
+  dfloat g,r,s,c,p,b,f;
+  const dfloat tol=1.e-16;
+
   // TODO: change index to 0-base
-  uint iskip = 0; // FIXME: this is odd..
-  for (l=1;l<=n;l++) {
-    if (iskip==0) {
-      iter = 0; 
-    }
+  for (l=1;l<=n;l++) { 
 
-    m = l - 1;
-    do {
-      m++;
-      dd = std::abs(d[m-1]) + std::abs(d[m]);
-    }
-    while ( (std::abs(e[m-1])+dd) == dd  &&  m <= n-1 );
-
+    // QR iteration
+    iter = 0;
     iskip = 0;
-    if (m!=l) {
-      iter = iter + 1;
-      g = (d[l]-d[l-1]) / (2.0*e[l-1]);
-      r = sqrt(g*g+1.0);
+    do {
 
-      g = d[m-1] - d[l-1] + e[l-1]/(g + f77sgn(r,g));
-      s = 1.0;
-      c = 1.0;
-      p = 0.0;
+      // detect m such that off-diag[m] = 0
+      m_in = l-1;
+      do {
+        m_in++;
 
-      for (i=m-1;i<=l;i++) {
-        f = s * e[i-1];
-        b = c * e[i-1];
-
-        if (std::abs(f) >= std::abs(g)) {
-          c = g / f;
-          r = sqrt(c*c+1.0);
-          e[i] = f*r;
-          s = 1.0/r;
-          c = c * s;
+        const dfloat ee = std::abs(e[m_in-1]);
+        if ( ee < tol ) {
+           m = m_in;
+        } else if(m_in==n-1) {
+           m = n;
         } else {
-          s = f / g;
-          r = sqrt(s*s+1.0);
-          e[i] = g*r;
-          c =  1.0 / r;
-          s = s * c;
+           continue;
         }
 
-        g = d[i] - p;
-        r = (d[i-1]-g) * s + 2.0 * c * b;
-        p = s * r;
-        d[i] = g + p;
-        g = c*r - b;
-      } // 14
+        if (m==l) {
+          iskip = 1;
+        } else { // m!=l
+          iter = iter + 1;
+          g = (d[l]-d[l-1]) / (2.0*e[l-1]);
+          r = sqrt(g*g+1.0);
+    
+          g = d[m-1] - d[l-1] + e[l-1]/(g + f77sgn(r,g));
+          s = 1.0;
+          c = 1.0;
+          p = 0.0;
+    
+          // QR iteration using givens' rotation
+          for (i=m-1;i>=l;i--) {
+            f = s * e[i-1];
+            b = c * e[i-1];
+    
+            if (std::abs(f) >= std::abs(g)) {
+              c = g / f;
+              r = sqrt(c*c+1.0);
+              e[i] = f*r;
+              s = 1.0/r;
+              c = c * s;
+            } else {
+              s = f / g;
+              r = sqrt(s*s+1.0);
+              e[i] = g*r;
+              c =  1.0 / r;
+              s = s * c;
+            }
+    
+            g = d[i] - p;
+            r = (d[i-1]-g) * s + 2.0 * c * b;
+            p = s * r;
+            d[i] = g + p;
+            g = c*r - b;
+          } // 14
+    
+          d[l-1] = d[l-1] - p;
+          e[l-1] = g;
+          e[m-1] = 0.0;
+        } // m<=l
 
-      d[l-1] = d[l-1] - p;
-      e[l-1] = g;
-      e[m-1] = 0.0;
+      } // m_in loop, exit at m_in==n
+      while (iskip==0 && m_in<n-1); 
 
-      iskip = 1;
-    } // m<=l
-  } // do
+    } // outer iteration
+    while (iskip==0 && iter<=30);
 
-  if (iskip==0) {
-    dmax = 0.0;
-    dmin = d[1];
-  }
+  } // l loop
+
+  dmax = 0.0;
+  dmin = d[0];
 
   for (i=1;i<=n;i++) {
     dmax = std::abs(std::max(d[i-1],dmax));
     dmin = std::abs(std::min(d[i-1],dmin));
   }
+  if(platform->comm.mpiRank == 0 && verbose) {
+    for (i=1;i<=n;i++) {
+      printf("PCG Ritz values %d / %d   %.6e \n", i, n, d[i-1]);
+    }
+  }
+  free(d);
+  free(e);
 }
+
 
 static dfloat update(elliptic_t* elliptic,
                      occa::memory &o_p, occa::memory &o_Ap, const dfloat alpha,
@@ -185,7 +210,6 @@ int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
 
   dfloat* diagt = (dfloat *) calloc(MAXIT, sizeof(dfloat));
   dfloat* upper = (dfloat *) calloc(MAXIT, sizeof(dfloat));
-  dfloat* dminmax = (dfloat *) calloc(2, sizeof(dfloat));
 
   dfloat rdotz1;
   dfloat alpha;

@@ -78,7 +78,7 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
           Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
         * sqrt(resNormFactor);
     if (platform->comm.mpiRank == 0) {
-      printf("it %d r norm %.8e \n",0,rdotr);
+      printf("CHEB it %d r norm %.8e \n",0,rdotr);
     }
   }
   
@@ -106,7 +106,7 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
            Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
          * sqrt(resNormFactor);
       if (platform->comm.mpiRank == 0) {
-        printf("it %d r norm %.8e \n",k,rdotr);
+        printf("CHEB it %d r norm %.8e \n",k,rdotr);
       }
     }
 
@@ -167,6 +167,10 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
     // TODO: estimate iteration number 
   }
   else {
+    if (verbose && platform->comm.mpiRank == 0) { 
+      printf("CHEBYSHEV ");
+      printf("%s: initial res norm %.15e WE NEED TO GET TO %e \n", elliptic->name.c_str(), rdotr, tol);
+    }
     ChebyshevSolver(elliptic, o_r, o_x, iter, dmin, dmax);
 
     // compute res
