@@ -57,7 +57,7 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
   const dlong offset = elliptic->fieldOffset;
 
   occa::memory &o_d = elliptic->o_p;
-  occa::memory &o_w = elliptic->o_res;
+  occa::memory &o_w = elliptic->o_tmp; //FIXME
   occa::memory &o_z = (!options.compareArgs("PRECONDITIONER", "NONE")) ? elliptic->o_z : o_x;
   occa::memory &o_Ap = elliptic->o_Ap;
   occa::memory &o_weight = elliptic->o_invDegree;
