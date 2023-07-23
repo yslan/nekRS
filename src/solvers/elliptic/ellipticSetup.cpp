@@ -174,6 +174,9 @@ void ellipticSolveSetup(elliptic_t *elliptic)
         platform->kernels.get(sectionIdentifier + "gramSchmidtOrthogonalization");
     elliptic->updatePGMRESSolutionKernel = platform->kernels.get(sectionIdentifier + "updatePGMRESSolution");
     elliptic->fusedResidualAndNormKernel = platform->kernels.get(sectionIdentifier + "fusedResidualAndNorm");
+  } 
+  else if (options.compareArgs("SOLVER", "CHEBYSHEV")) {
+    elliptic->o_tmp = platform->device.malloc((elliptic->Nfields * sizeof(dfloat)) * elliptic->fieldOffset);
   }
 
   mesh->maskKernel = platform->kernels.get("mask");

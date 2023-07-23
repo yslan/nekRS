@@ -246,7 +246,7 @@ void ellipticOgs(mesh_t *mesh,
 
 static void ellipticUpdateWorkspace(elliptic_t* elliptic)
 {
-  const auto Nfields = 7; // first 7 slices are reserved as input to ellipticSolve
+  const auto Nfields = 6; // first 6 slices are reserved as input to ellipticSolve
   const auto offsetBytesWrk = elliptic->fieldOffset * (Nfields * sizeof(dfloat));
   const auto offsetBytes = elliptic->fieldOffset * (elliptic->Nfields * sizeof(dfloat));
 
@@ -266,7 +266,6 @@ static void ellipticUpdateWorkspace(elliptic_t* elliptic)
   elliptic->o_x0 = elliptic->o_wrk + 3 * offsetBytes;
   elliptic->o_rPfloat = elliptic->o_wrk + 4 * offsetBytes;
   elliptic->o_zPfloat = elliptic->o_wrk + 5 * offsetBytes;
-  elliptic->o_tmp = elliptic->o_wrk + 6 * offsetBytes; // FIXME: wrk array for chebyshev iter
 }
  
 #endif
