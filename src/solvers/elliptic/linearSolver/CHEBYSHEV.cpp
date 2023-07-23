@@ -57,21 +57,16 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
   const dlong offset = elliptic->fieldOffset;
 
   occa::memory &o_d = elliptic->o_p;
-  occa::memory &o_z = elliptic->o_z;
+  occa::memory &o_w = elliptic->o_res;
+  occa::memory &o_z = (!options.compareArgs("PRECONDITIONER", "NONE")) ? elliptic->o_z : o_x;
   occa::memory &o_Ap = elliptic->o_Ap;
   occa::memory &o_weight = elliptic->o_invDegree;
   dfloat resNormFactor = elliptic->resNormFactor;
   dfloat rdotr;
 
   if (restart==0) {
-    // r = S(r-Ax)
-    ellipticOperator(elliptic, o_x, o_Ap, dfloatString); // Ap = A x
-    if(!options.compareArgs("PRECONDITIONER", "NONE")) {
-      platform->linAlg->axpbyzMany(Nlocal, Nfields, offset, one, o_r, mone, o_Ap, o_z); // z = r - Ap
-      ellipticPreconditioner(elliptic, o_z, o_r); // r = S z
-    } else {
-      platform->linAlg->axpbyMany(Nlocal, Nfields, offset, mone, o_Ap, one, o_r); // r = r - Ax
-    }
+    // r = r - A Minv z, z0 = 0
+    platform->linAlg->scaleMany(Nlocal, Nfields, offset, zero, o_z); // z = 0 * z
   
     // Only compute norm in verbose mode
     if (verbose) {
@@ -87,19 +82,19 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
     // d = 0 * d + invTheta * r
     platform->linAlg->axpbyMany(Nlocal, Nfields, offset, invTheta, o_r, zero, o_d);
   }
-  for (int k = 1; k <= niter; k++) {
 
+  for (int k = 1; k <= niter; k++) {
     // x = x + d
-    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, one, o_d, one, o_x);   
+    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, one, o_d, one, o_z);   
 
     // r = r - SA d = r - z
     if(!options.compareArgs("PRECONDITIONER", "NONE")) {
-      ellipticOperator(elliptic, o_d, o_Ap, dfloatString);
-      ellipticPreconditioner(elliptic, o_Ap, o_z);
+      ellipticPreconditioner(elliptic, o_d, o_w);
+      ellipticOperator(elliptic, o_w, o_Ap, dfloatString);
     } else {
-      ellipticOperator(elliptic, o_d, o_z, dfloatString);
+      ellipticOperator(elliptic, o_d, o_Ap, dfloatString);
     }
-    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, mone, o_z, one, o_r); // r = r - z
+    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, mone, o_Ap, one, o_r); // r = r - z
 
     // Only compute norm in verbose mode
     if (verbose) {
@@ -120,7 +115,11 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
   }
 
   // x = x + d
-  platform->linAlg->axpbyMany(Nlocal, Nfields, offset, one, o_d, one, o_x);
+  platform->linAlg->axpbyMany(Nlocal, Nfields, offset, one, o_d, one, o_z);
+
+  if(!options.compareArgs("PRECONDITIONER", "NONE")) {
+    ellipticPreconditioner(elliptic, o_z, o_x);
+  }
 }
 
 int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
