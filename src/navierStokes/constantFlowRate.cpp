@@ -84,7 +84,7 @@ void compute(nrs_t *nrs, dfloat time, int tstep) {
   platform->timer.toc("pressure rhs");
 
   platform->timer.tic("pressureSolve", 1);
-  ellipticSolve(nrs->pSolver, o_Prhs, nrs->o_Pc, 0);
+  ellipticSolve(nrs->pSolver, o_Prhs, nrs->o_Pc, tstep);
   platform->timer.toc("pressureSolve");
 
   // solve homogenous Stokes problem
