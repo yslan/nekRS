@@ -332,5 +332,8 @@ int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
       printf("%s PCG eigen: dmin %.8e dmax %.8e \n", elliptic->name.c_str(),dmin,dmax);
   }
 
+  free(diagt);
+  free(upper);
+
   return iter;
 }
