@@ -178,6 +178,7 @@ void ellipticSolveSetup(elliptic_t *elliptic)
   else if (options.compareArgs("SOLVER", "CHEBYSHEV")) {
     elliptic->o_tmp = platform->device.malloc((elliptic->Nfields * sizeof(dfloat)) * elliptic->fieldOffset); // TODO: do it in ellipticUpdateWorkspace
     initializePcgEigenData(elliptic);
+    initializePchebData(elliptic);
   }
 
   mesh->maskKernel = platform->kernels.get("mask");

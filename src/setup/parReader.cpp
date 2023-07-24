@@ -1120,8 +1120,9 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
       {"pcg"},
       {"block"},
       {"chebyshev"},
-      {"start"},
+      {"startstep"},
       {"iter"},
+      {"guess"},
       {"extra"},
   };
   std::vector<std::string> list = serializeString(p_solver, '+');
@@ -1168,7 +1169,7 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
     std::string n = "10";
     std::string m = "20";
     for (std::string s : list) {
-      const auto nvectorStr1 = parseValueForKey(s, "start");
+      const auto nvectorStr1 = parseValueForKey(s, "startstep");
       if (!nvectorStr1.empty()) {
         n = nvectorStr1;
       }
@@ -1177,9 +1178,8 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
         m = nvectorStr2;
       }
     }
-    options.setArgs(parSectionName + "CHEBYSHEV START", n);
+    options.setArgs(parSectionName + "CHEBYSHEV STARTSTEP", n);
     options.setArgs(parSectionName + "CHEBYSHEV ITER", m);
-
 
     if (p_solver.find("block") != std::string::npos) {
       options.setArgs(parSectionName + "BLOCK SOLVER", "TRUE");
@@ -1187,11 +1187,17 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
     else {
       options.setArgs(parSectionName + "BLOCK SOLVER", "FALSE");
     }
-    if (p_solver.find("extra") != std::string::npos) {
-      options.setArgs(parSectionName + "CHEBYSHEV EXTRA", "TRUE");
+    if (p_solver.find("guess") != std::string::npos) {
+      options.setArgs(parSectionName + "CHEBYSHEV GUESS ITER", "TRUE");
     }
     else {
-      options.setArgs(parSectionName + "CHEBYSHEV EXTRA", "FALSE");
+      options.setArgs(parSectionName + "CHEBYSHEV GUESS ITER", "FALSE");
+    }
+    if (p_solver.find("extra") != std::string::npos) {
+      options.setArgs(parSectionName + "CHEBYSHEV EXTRA ITER", "TRUE");
+    }
+    else {
+      options.setArgs(parSectionName + "CHEBYSHEV EXTRA ITER", "FALSE");
     }
     if (p_solver.find("fcg") != std::string::npos || p_solver.find("flexible") != std::string::npos) {
       p_solver = "CHEBYSHEV+FLEXIBLE"; // TODO: need test

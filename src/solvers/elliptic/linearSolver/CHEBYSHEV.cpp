@@ -30,6 +30,14 @@
 #include "linAlg.hpp"
 
 //#define DEBUG
+PchebData::PchebData(elliptic_t *elliptic) {
+  isConvRateReady = 0;
+}
+
+void initializePchebData(elliptic_t* elliptic) {
+   PchebData *pchebData = new PchebData(elliptic);
+   elliptic->pchebData = pchebData;
+} 
 
 static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
                             int niter, dfloat dmin, dfloat dmax, int restart) {
@@ -123,49 +131,61 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
   setupAide& options = elliptic->options;
   const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
 
-  int istepStart = 10, iter = 10;
-  elliptic->options.getArgs("CHEBYSHEV START", istepStart);
+  int startStep = 10, iter = 10;
+  elliptic->options.getArgs("CHEBYSHEV STARTSTEP", startStep);
   elliptic->options.getArgs("CHEBYSHEV ITER", iter);
-  const int extra = options.compareArgs("CHEBYSHEV EXTRA", "TRUE");
+  const int extra = options.compareArgs("CHEBYSHEV EXTRA ITER", "TRUE");
+  const int guess = options.compareArgs("CHEBYSHEV GUESS ITER", "TRUE");
+  const int isConvRateReady = elliptic->pchebData->isConvRateReady;
 
-  if (istepStart<=0) {
+  if (startStep<=0) {
     nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
-             "%s%d\n", "Chebyshev solver: Invalid istepStart!",istepStart); 
+             "%s%d\n", "Chebyshev solver: Invalid startStep!",startStep); 
   }
   if (iter<=0) {
     nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
              "%s%d\n", "Chebyshev solver: Invalid iter!",iter); 
   }
 
-
   dfloat dmin = elliptic->pcgEigenData->dmin;
   dfloat dmax = elliptic->pcgEigenData->dmax;
   if (verbose && platform->comm.mpiRank == 0) { 
-    printf("%s Chebyshev step=%d, start=%d iter=%d extra=%d  dmin %.6e dmax %.6e \n"
-          ,elliptic->name.c_str(),tstep,istepStart,iter,extra,dmin,dmax);
+    printf("%s Chebyshev step=%d, start=%d iter=%d guess=%d extra=%d dmin %.6e dmax %.6e\n"
+          ,elliptic->name.c_str(),tstep,startStep,iter,guess,extra,dmin,dmax);
   }
 
-  if (tstep < istepStart) {
+  if (tstep < startStep) {
+    // Run PCG to estimate eigenvalues
     iter = pcg_eigen(elliptic, o_r, o_x, tol, MAXIT, rdotr, dmin, dmax);
     if (iter>=3) {
       elliptic->pcgEigenData->dmin = dmin;
       elliptic->pcgEigenData->dmax = dmax;
       elliptic->pcgEigenData->isEigenReady = 1;
-   }
-    // TODO: estimate iteration number 
+    }
   }
   else {
     if (elliptic->pcgEigenData->isEigenReady==0) {
       nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
                "%s\n", "Chebyshev solver: dmin/dmax is not set!");
     }
+
+    // Guess Iteration number based on previous conv. rate
+    if (guess && isConvRateReady==1) {
+      iter = ((int)  ( (log(tol) - log(elliptic->res0Norm)) / elliptic->pchebData->logConvRate ) ) + 1;
+      if (verbose && platform->comm.mpiRank == 0) {
+        printf("%s Chebyshev guess iter: r0 = %.6e  rate = %.6e  change iter to %d \n"
+              ,elliptic->name.c_str(),elliptic->res0Norm,exp(elliptic->pchebData->logConvRate),iter);
+      }
+    }
+
+    // Main solve
     if (verbose && platform->comm.mpiRank == 0) { 
       printf("CHEBYSHEV ");
       printf("%s: initial res norm %.15e WE NEED TO GET TO %e \n", elliptic->name.c_str(), rdotr, tol);
     }
     ChebyshevSolver(elliptic, o_r, o_x, iter, dmin, dmax, 0);
 
-    // compute res
+    // Compute res
     rdotr = platform->linAlg->weightedNorm2Many(
         mesh->Nlocal,
         elliptic->Nfields,
@@ -176,17 +196,47 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
       ) 
       * sqrt(elliptic->resNormFactor);
 
+    const dfloat logConvRate = (log(rdotr) - log(elliptic->res0Norm)) / ((dfloat) iter);
+    const dfloat conditionNumber = dmax / dmin;
+    const dfloat theoConvRate = (sqrt(conditionNumber)-1.0) / (sqrt(conditionNumber) + 1.0);
+    if (verbose && platform->comm.mpiRank == 0) {
+      printf("%s Chebyshev stat: iter = %d, rnorm from %.6e to %.6e, Conv rate = %.6e (theo = %.6e)\n"
+            ,elliptic->name.c_str(),iter,elliptic->res0Norm,rdotr,exp(logConvRate),theoConvRate);
+    }    
+
+    // Store logConvRate
+    if (guess && isConvRateReady==0) {
+      elliptic->pchebData->logConvRate = logConvRate; // or using theoConvRate??
+      elliptic->pchebData->isConvRateReady = 1;
+      if (platform->comm.mpiRank == 0) {
+        printf("%s Chebyshev save ConvRate at step = %d, with rate = %.8e \n"
+              ,elliptic->name.c_str(),tstep,exp(logConvRate));
+      }
+    }
+
+    // Extra iterations
     if (extra && rdotr>tol) {
-      const dfloat logConvRate = (log(rdotr) - log(elliptic->res0Norm)) / ((dfloat) iter);
       const int extraIteration = ((int)  ( (log(tol) - log(rdotr)) / logConvRate ) ) + 1;
       if (extraIteration>=1) {
         ChebyshevSolver(elliptic, o_r, o_x, extraIteration, dmin, dmax, iter);
         iter = iter + extraIteration;
       }
       if (platform->comm.mpiRank == 0) {
-        printf("%s Chebyshev extra iter:  conv. rate %.6e extraIter %d \n"
-              ,elliptic->name.c_str(),exp(logConvRate),extraIteration);
+        printf("%s Chebyshev extra: conv. rate = %.6e (theo. rate = %.6e), extraIter = %d \n"
+              ,elliptic->name.c_str(),exp(logConvRate),theoConvRate,extraIteration);
       }
+
+/*
+      // if iter is off, update estimator in next step // TODO, this is kind of a corner case.
+      if (guess && extraIteration>=5) {
+        elliptic->pchebData->logConvRate = logConvRate; 
+        elliptic->pchebData->isConvRateReady = 1;
+        if (platform->comm.mpiRank == 0) {
+          printf("%s Chebyshev save ConvRate at step = %d, with rate = %.8e \n"
+                ,elliptic->name.c_str(),tstep,exp(logConvRate));
+        }
+      }
+*/
     }
   }
 

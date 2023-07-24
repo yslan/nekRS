@@ -73,18 +73,18 @@ struct GmresData{
 struct PcgEigenData {
    PcgEigenData(elliptic_t*);
    int maxIter;
-   int isEigenReady;
+   int isEigenReady = 0;
    dfloat dmin;
    dfloat dmax;
    dfloat *diagt;
    dfloat *upper;
 };
 
-/* TODO: next feature?
 struct PchebData {
-   dfloat prevConvRate;
-}
-*/
+   PchebData(elliptic_t*);
+   int isConvRateReady = 0;
+   dfloat logConvRate;
+};
 
 struct elliptic_t
 {
@@ -191,6 +191,7 @@ struct elliptic_t
   SolutionProjection* solutionProjection;
   GmresData *gmresData;
   PcgEigenData *pcgEigenData;
+  PchebData *pchebData;
 
   std::function<void(dlong Nelements, occa::memory &o_elementList, occa::memory &o_x)> applyZeroNormalMask;
   std::function<void(occa::memory & o_r, occa::memory & o_z)> userPreconditioner;
@@ -215,6 +216,7 @@ int pcg(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
 
 void initializeGmresData(elliptic_t*);
 void initializePcgEigenData(elliptic_t*);
+void initializePchebData(elliptic_t*);
 
 int pgmres(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
         const dfloat tol, const int MAXIT, dfloat &res);
