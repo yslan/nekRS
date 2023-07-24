@@ -33,6 +33,25 @@
 #include "linAlg.hpp"
 
 //#define DEBUG
+//
+
+PcgEigenData::PcgEigenData(elliptic_t *elliptic)
+    : maxIter([&]() {
+        int _maxIter = 500;
+        elliptic->options.getArgs("MAXIMUM ITERATIONS", _maxIter);
+        return _maxIter;
+      }()),
+      diagt((dfloat *)calloc(maxIter, sizeof(dfloat))),
+      upper((dfloat *)calloc(maxIter, sizeof(dfloat)))
+{
+   isEigenReady = 0;
+}
+
+void initializePcgEigenData(elliptic_t *elliptic) {
+  PcgEigenData *pcgEigenData = new PcgEigenData(elliptic);
+  elliptic->pcgEigenData = pcgEigenData;
+}
+
 static dfloat f77sgn(dfloat val1, dfloat val2) { // return val1 with sign of val2
   return (val2 < 0) ? -std::abs(val1) : std::abs(val1);
 }
@@ -45,29 +64,25 @@ static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat &dmin, 
   // Rayleight-quotient with QR iter and Wilkinson's shift
 
   const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
-  dfloat* d = (dfloat *) calloc(n, sizeof(dfloat));
-  dfloat* e = (dfloat *) calloc(n, sizeof(dfloat));
-
-  memcpy(d, diagt, n*sizeof(dfloat));
-  memcpy(e, upper, n*sizeof(dfloat));
-
-  uint l,m,i,iter,m_in,iskip;
-  dfloat g,r,s,c,p,b,f;
+  dfloat* d = diagt; 
+  dfloat* e = upper;
   const dfloat tol=1.e-16;
 
   // TODO: change index to 0-base
+  uint l;
   for (l=1;l<=n;l++) { 
 
     // QR iteration
-    iter = 0;
-    iskip = 0;
+    uint iter = 0;
+    uint iskip = 0;
     do {
 
       // detect m such that off-diag[m] = 0
-      m_in = l-1;
+      uint m_in = l-1;
       do {
         m_in++;
 
+        uint m;
         const dfloat ee = std::abs(e[m_in-1]);
         if ( ee < tol ) {
            m = m_in;
@@ -77,22 +92,24 @@ static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat &dmin, 
            continue;
         }
 
+
         if (m==l) {
           iskip = 1;
         } else { // m!=l
           iter = iter + 1;
-          g = (d[l]-d[l-1]) / (2.0*e[l-1]);
-          r = sqrt(g*g+1.0);
+          dfloat g = (d[l]-d[l-1]) / (2.0*e[l-1]);
+          dfloat r = sqrt(g*g+1.0);
     
           g = d[m-1] - d[l-1] + e[l-1]/(g + f77sgn(r,g));
-          s = 1.0;
-          c = 1.0;
-          p = 0.0;
+          dfloat s = 1.0;
+          dfloat c = 1.0;
+          dfloat p = 0.0;
     
           // QR iteration using givens' rotation
+          uint i;
           for (i=m-1;i>=l;i--) {
-            f = s * e[i-1];
-            b = c * e[i-1];
+            const dfloat f = s * e[i-1];
+            const dfloat b = c * e[i-1];
     
             if (std::abs(f) >= std::abs(g)) {
               c = g / f;
@@ -131,6 +148,7 @@ static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat &dmin, 
   dmax = 0.0;
   dmin = d[0];
 
+  uint i;
   for (i=1;i<=n;i++) {
     dmax = std::abs(std::max(d[i-1],dmax));
     dmin = std::abs(std::min(d[i-1],dmin));
@@ -140,8 +158,6 @@ static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat &dmin, 
       printf("PCG Ritz values %d / %d   %.6e \n", i, n, d[i-1]);
     }
   }
-  free(d);
-  free(e);
 }
 
 
@@ -208,8 +224,8 @@ int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
   const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
   const int fixedIteration = false;
 
-  dfloat* diagt = (dfloat *) calloc(MAXIT, sizeof(dfloat));
-  dfloat* upper = (dfloat *) calloc(MAXIT, sizeof(dfloat));
+  dfloat* diagt = elliptic->pcgEigenData->diagt;
+  dfloat* upper = elliptic->pcgEigenData->upper;
 
   dfloat rdotz1;
   dfloat alpha;
@@ -331,9 +347,6 @@ int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
     if (verbose && platform->comm.mpiRank == 0)
       printf("%s PCG eigen: dmin %.8e dmax %.8e \n", elliptic->name.c_str(),dmin,dmax);
   }
-
-  free(diagt);
-  free(upper);
 
   return iter;
 }

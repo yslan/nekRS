@@ -176,7 +176,8 @@ void ellipticSolveSetup(elliptic_t *elliptic)
     elliptic->fusedResidualAndNormKernel = platform->kernels.get(sectionIdentifier + "fusedResidualAndNorm");
   } 
   else if (options.compareArgs("SOLVER", "CHEBYSHEV")) {
-    elliptic->o_tmp = platform->device.malloc((elliptic->Nfields * sizeof(dfloat)) * elliptic->fieldOffset);
+    elliptic->o_tmp = platform->device.malloc((elliptic->Nfields * sizeof(dfloat)) * elliptic->fieldOffset); // TODO: do it in ellipticUpdateWorkspace
+    initializePcgEigenData(elliptic);
   }
 
   mesh->maskKernel = platform->kernels.get("mask");

@@ -29,12 +29,6 @@
 #include "timer.hpp"
 #include "linAlg.hpp"
 
-#define MAXSOLVER 10
-dfloat dmin_all[MAXSOLVER];
-dfloat dmax_all[MAXSOLVER];
-int isolver = 0;
-int tstep_prev = -1;
-
 //#define DEBUG
 
 static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
@@ -134,13 +128,6 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
   elliptic->options.getArgs("CHEBYSHEV ITER", iter);
   const int extra = options.compareArgs("CHEBYSHEV EXTRA", "TRUE");
 
-  if (tstep!=tstep_prev) {
-    isolver = 0;
-  }
-  if (isolver>MAXSOLVER) {
-    nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
-             "%s%d\n", "Chebyshev solver: not enough space sor all solvers!",isolver);
-  }
   if (istepStart<=0) {
     nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
              "%s%d\n", "Chebyshev solver: Invalid istepStart!",istepStart); 
@@ -151,22 +138,27 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
   }
 
 
-  dfloat dmin = dmin_all[isolver];
-  dfloat dmax = dmax_all[isolver];
+  dfloat dmin = elliptic->pcgEigenData->dmin;
+  dfloat dmax = elliptic->pcgEigenData->dmax;
   if (verbose && platform->comm.mpiRank == 0) { 
-    printf("%s %d Chebyshev step=%d, start=%d iter=%d extra=%d  dmin %.6e dmax %.6e \n"
-          ,elliptic->name.c_str(),isolver,tstep,istepStart,iter,extra,dmin,dmax);
+    printf("%s Chebyshev step=%d, start=%d iter=%d extra=%d  dmin %.6e dmax %.6e \n"
+          ,elliptic->name.c_str(),tstep,istepStart,iter,extra,dmin,dmax);
   }
 
   if (tstep < istepStart) {
     iter = pcg_eigen(elliptic, o_r, o_x, tol, MAXIT, rdotr, dmin, dmax);
     if (iter>=3) {
-      dmin_all[isolver] = dmin;
-      dmax_all[isolver] = dmax;
-    }
+      elliptic->pcgEigenData->dmin = dmin;
+      elliptic->pcgEigenData->dmax = dmax;
+      elliptic->pcgEigenData->isEigenReady = 1;
+   }
     // TODO: estimate iteration number 
   }
   else {
+    if (elliptic->pcgEigenData->isEigenReady==0) {
+      nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
+               "%s\n", "Chebyshev solver: dmin/dmax is not set!");
+    }
     if (verbose && platform->comm.mpiRank == 0) { 
       printf("CHEBYSHEV ");
       printf("%s: initial res norm %.15e WE NEED TO GET TO %e \n", elliptic->name.c_str(), rdotr, tol);
@@ -191,14 +183,12 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
         ChebyshevSolver(elliptic, o_r, o_x, extraIteration, dmin, dmax, iter);
         iter = iter + extraIteration;
       }
-      if (verbose && platform->comm.mpiRank == 0) {
+      if (platform->comm.mpiRank == 0) {
         printf("%s Chebyshev extra iter:  conv. rate %.6e extraIter %d \n"
               ,elliptic->name.c_str(),exp(logConvRate),extraIteration);
       }
     }
   }
 
-  tstep_prev = tstep;
-  isolver++;
   return iter;
 }

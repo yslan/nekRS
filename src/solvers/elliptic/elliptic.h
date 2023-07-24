@@ -70,6 +70,22 @@ struct GmresData{
   dfloat* scratch;
 };
 
+struct PcgEigenData {
+   PcgEigenData(elliptic_t*);
+   int maxIter;
+   int isEigenReady;
+   dfloat dmin;
+   dfloat dmax;
+   dfloat *diagt;
+   dfloat *upper;
+};
+
+/* TODO: next feature?
+struct PchebData {
+   dfloat prevConvRate;
+}
+*/
+
 struct elliptic_t
 {
   static constexpr double targetTimeBenchmark {0.2};
@@ -174,6 +190,7 @@ struct elliptic_t
 
   SolutionProjection* solutionProjection;
   GmresData *gmresData;
+  PcgEigenData *pcgEigenData;
 
   std::function<void(dlong Nelements, occa::memory &o_elementList, occa::memory &o_x)> applyZeroNormalMask;
   std::function<void(occa::memory & o_r, occa::memory & o_z)> userPreconditioner;
@@ -197,6 +214,8 @@ int pcg(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
         const dfloat tol, const int MAXIT, dfloat &res);
 
 void initializeGmresData(elliptic_t*);
+void initializePcgEigenData(elliptic_t*);
+
 int pgmres(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
         const dfloat tol, const int MAXIT, dfloat &res);
 
