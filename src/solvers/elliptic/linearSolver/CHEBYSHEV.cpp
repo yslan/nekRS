@@ -103,6 +103,9 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
       rdotr = platform->linAlg->weightedNorm2Many(
            Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
          * sqrt(resNormFactor);
+//      const dfloat zdotr = sqrt(platform->linAlg->weightedInnerProdMany(
+//           Nlocal, Nfields, offset, o_weight, o_r, o_Ap, platform->comm.mpiComm))
+//         * sqrt(resNormFactor);      
       if (platform->comm.mpiRank == 0) {
         printf("CHEB it %d r norm %.8e \n",k+restart,rdotr);
       }
@@ -131,35 +134,42 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
   setupAide& options = elliptic->options;
   const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
 
-  int startStep = 10, iter = 10;
+  int startStep = 10, iter = 10, startStepEigen=1;
   elliptic->options.getArgs("CHEBYSHEV STARTSTEP", startStep);
   elliptic->options.getArgs("CHEBYSHEV ITER", iter);
+  elliptic->options.getArgs("CHEBYSHEV STARTSTEPEIGEN", startStepEigen);
+  startStepEigen=std::min(startStepEigen, startStep-1);
+  startStepEigen=std::max(startStepEigen, 0);
   const int extra = options.compareArgs("CHEBYSHEV EXTRA ITER", "TRUE");
   const int guess = options.compareArgs("CHEBYSHEV GUESS ITER", "TRUE");
   const int isConvRateReady = elliptic->pchebData->isConvRateReady;
 
   if (startStep<=0) {
     nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
-             "%s%d\n", "Chebyshev solver: Invalid startStep!",startStep); 
+             "%s %d\n", "Chebyshev solver: Invalid startStep!",startStep); 
   }
   if (iter<=0) {
     nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
-             "%s%d\n", "Chebyshev solver: Invalid iter!",iter); 
+             "%s %d\n", "Chebyshev solver: Invalid iter!",iter); 
+  }
+  if (startStepEigen<=0 || startStepEigen>=startStep) {
+    nrsAbort(platform->comm.mpiComm, EXIT_FAILURE,
+             "%s %d\n", "Chebyshev solver: Invalid startStepEigen!",startStepEigen);     
   }
 
   dfloat dmin = elliptic->pcgEigenData->dmin;
   dfloat dmax = elliptic->pcgEigenData->dmax;
   if (verbose && platform->comm.mpiRank == 0) { 
-    printf("%s Chebyshev step=%d, start=%d iter=%d guess=%d extra=%d dmin %.6e dmax %.6e\n"
-          ,elliptic->name.c_str(),tstep,startStep,iter,guess,extra,dmin,dmax);
+    printf("%s Chebyshev step=%d (start=%d %d) iter=%d (guess=%d extra=%d) dmin %.6e dmax %.6e\n"
+          ,elliptic->name.c_str(),tstep,startStep,startStepEigen,iter,guess,extra,dmin,dmax);
   }
 
   if (tstep < startStep) {
     // Run PCG to estimate eigenvalues
     iter = pcg_eigen(elliptic, o_r, o_x, tol, MAXIT, rdotr, dmin, dmax);
-    if (iter>=3) {
-      elliptic->pcgEigenData->dmin = dmin;
-      elliptic->pcgEigenData->dmax = dmax;
+    if (iter>=3 && tstep>=startStepEigen) {
+      elliptic->pcgEigenData->dmin = std::min(dmin,elliptic->pcgEigenData->dmin);
+      elliptic->pcgEigenData->dmax = std::max(dmax,elliptic->pcgEigenData->dmax);
       elliptic->pcgEigenData->isEigenReady = 1;
     }
   }
@@ -228,12 +238,14 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
 
 /*
       // if iter is off, update estimator in next step // TODO, this is kind of a corner case.
-      if (guess && extraIteration>=5) {
-        elliptic->pchebData->logConvRate = logConvRate; 
-        elliptic->pchebData->isConvRateReady = 1;
-        if (platform->comm.mpiRank == 0) {
-          printf("%s Chebyshev save ConvRate at step = %d, with rate = %.8e \n"
-                ,elliptic->name.c_str(),tstep,exp(logConvRate));
+      if (guess && isConvRateReady==1)
+        if (extraIteration>=5 || std::abs(logConvRate-elliptic->pchebData->logConvRate)>3.0) {
+          elliptic->pchebData->logConvRate = logConvRate; 
+          elliptic->pchebData->isConvRateReady = 1;
+          if (platform->comm.mpiRank == 0) {
+            printf("%s Chebyshev save ConvRate at step = %d, with rate = %.8e \n"
+                  ,elliptic->name.c_str(),tstep,exp(logConvRate));
+          }
         }
       }
 */

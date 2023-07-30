@@ -1121,6 +1121,7 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
       {"block"},
       {"chebyshev"},
       {"startstep"},
+      {"starteigen"},
       {"iter"},
       {"guess"},
       {"extra"},
@@ -1168,6 +1169,7 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
     list = serializeString(p_solver, '+');
     std::string n = "10";
     std::string m = "20";
+    std::string l = "1";
     for (std::string s : list) {
       const auto nvectorStr1 = parseValueForKey(s, "startstep");
       if (!nvectorStr1.empty()) {
@@ -1177,9 +1179,14 @@ void parseLinearSolver(const int rank, setupAide &options, inipp::Ini *par, std:
       if (!nvectorStr2.empty()) {
         m = nvectorStr2;
       }
+      const auto nvectorStr3 = parseValueForKey(s, "starteigen");
+      if (!nvectorStr3.empty()) {
+        l = nvectorStr3;
+      }
     }
     options.setArgs(parSectionName + "CHEBYSHEV STARTSTEP", n);
     options.setArgs(parSectionName + "CHEBYSHEV ITER", m);
+    options.setArgs(parSectionName + "CHEBYSHEV STARTSTEPEIGEN", l);
 
     if (p_solver.find("block") != std::string::npos) {
       options.setArgs(parSectionName + "BLOCK SOLVER", "TRUE");

@@ -33,8 +33,6 @@
 #include "linAlg.hpp"
 
 //#define DEBUG
-//
-
 PcgEigenData::PcgEigenData(elliptic_t *elliptic)
     : maxIter([&]() {
         int _maxIter = 500;
@@ -45,11 +43,65 @@ PcgEigenData::PcgEigenData(elliptic_t *elliptic)
       upper((dfloat *)calloc(maxIter, sizeof(dfloat)))
 {
    isEigenReady = 0;
+   dmin = 1e31;
+   dmax = -1e31;
 }
 
 void initializePcgEigenData(elliptic_t *elliptic) {
   PcgEigenData *pcgEigenData = new PcgEigenData(elliptic);
   elliptic->pcgEigenData = pcgEigenData;
+}
+
+extern "C" {
+void dstevd_ (char* JOBZ, int* N, double* D, double *E, double *Z, int* LDZ, 
+              double* WORK, int* LWORK, int* IWORK, int* LIWORK, int* INFO);
+}
+
+// compute right eigenvectors
+void triDiagEig(int N, dfloat* D, dfloat* E, dfloat &dmin, dfloat &dmax)
+{
+  const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
+
+  char JOBZ = 'N';
+  int LDZ = N;
+  int LWORK = 1;
+  int IWORK = 1;
+  int LIWORK = 1;
+
+  double* WORK  = new double[LWORK];
+  double* tmpZ = NULL;
+
+  auto invalid = 0;
+  for(int i = 0; i < N; i++) {
+    if(std::isnan(D[i]) || std::isinf(D[i])) invalid++;
+  }
+  for(int i = 0; i < N-1; i++) {
+    if(std::isnan(E[i]) || std::isinf(E[i])) invalid++;
+  }
+  nrsCheck(invalid, platform->comm.mpiComm, EXIT_FAILURE,
+           "%s\n", "invalid matrix entries!");
+
+  int INFO = -999;
+  dstevd_ (&JOBZ, &N, D, E, tmpZ, &LDZ, WORK, &LWORK, &IWORK, &LIWORK, &INFO);
+
+  nrsCheck(INFO != 0, platform->comm.mpiComm, EXIT_FAILURE,
+           "%s %d\n", "dstevd failed INFO = ", INFO);
+
+  dmin = D[0]; // LAPACAK has sorted it?
+  dmax = D[N-1];
+  for (int i = 0;i < N; i++) {
+    dmax = std::abs(std::max(D[i],dmax));
+    dmin = std::abs(std::min(D[i],dmin));
+  }
+  
+  if (verbose && platform->comm.mpiRank == 0) {
+    for(int i = 0; i < N; i++) {
+      printf("Ritz Value by LAPACK %d / %d   %.6e\n", i+1, N, D[i]);
+    }
+  }
+
+  delete [] WORK;
+    
 }
 
 static dfloat f77sgn(dfloat val1, dfloat val2) { // return val1 with sign of val2
@@ -157,6 +209,12 @@ static void calc_eigen(dfloat* diagt, dfloat* upper, const int n, dfloat &dmin, 
     for (i=1;i<=n;i++) {
       printf("PCG Ritz values %d / %d   %.6e \n", i, n, d[i-1]);
     }
+  }
+  if (platform->comm.mpiRank == 0) {
+    nrsCheck(std::isnan(dmin), MPI_COMM_SELF, EXIT_FAILURE,
+             "%s\n", "Detected invalid dmin while solving eigenvalues!");
+    nrsCheck(std::isnan(dmax), MPI_COMM_SELF, EXIT_FAILURE,
+             "%s\n", "Detected invalid dmax while solving eigenvalues!");
   }
 }
 
@@ -343,7 +401,8 @@ int pcg_eigen(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
   while (rdotr > tol && iter < MAXIT);
 
   if (iter>=3) {
-    calc_eigen(diagt,upper,iter,dmin,dmax);
+    triDiagEig(iter, diagt, upper, dmin, dmax);
+//    calc_eigen(diagt,upper,iter,dmin,dmax);
     if (verbose && platform->comm.mpiRank == 0)
       printf("%s PCG eigen: dmin %.8e dmax %.8e \n", elliptic->name.c_str(),dmin,dmax);
   }
