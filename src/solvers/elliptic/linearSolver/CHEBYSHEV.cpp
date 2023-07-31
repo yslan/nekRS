@@ -168,9 +168,20 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
     // Run PCG to estimate eigenvalues
     iter = pcg_eigen(elliptic, o_r, o_x, tol, MAXIT, rdotr, dmin, dmax);
     if (iter>=3 && tstep>=startStepEigen) {
-      elliptic->pcgEigenData->dmin = std::min(dmin,elliptic->pcgEigenData->dmin);
-      elliptic->pcgEigenData->dmax = std::max(dmax,elliptic->pcgEigenData->dmax);
+      int issave = 0;
+      if (dmin<elliptic->pcgEigenData->dmin) {
+         elliptic->pcgEigenData->dmin = dmin;
+         issave = 1;
+      }
+      if (dmax>elliptic->pcgEigenData->dmax) {
+         elliptic->pcgEigenData->dmax = dmax;
+         issave = 1;
+      }
       elliptic->pcgEigenData->isEigenReady = 1;
+      if (issave==1 && platform->comm.mpiRank == 0) {
+        printf("%s Chebyshev step=%d update eigen: dmin %.6e dmax %.6e\n"
+          ,elliptic->name.c_str(),tstep,dmin,dmax);
+      }
     }
   }
   else {
