@@ -60,7 +60,7 @@ void dstevd_ (char* JOBZ, int* N, double* D, double *E, double *Z, int* LDZ,
 // compute right eigenvectors
 void triDiagEig(int N, dfloat* D, dfloat* E, dfloat &dmin, dfloat &dmax)
 {
-  const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
+  int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
 
   char JOBZ = 'N';
   int LDZ = N;
@@ -89,9 +89,15 @@ void triDiagEig(int N, dfloat* D, dfloat* E, dfloat &dmin, dfloat &dmax)
 
   dmin = D[0]; // LAPACAK has sorted it?
   dmax = D[N-1];
-  for (int i = 0;i < N; i++) {
-    dmax = std::abs(std::max(D[i],dmax));
-    dmin = std::abs(std::min(D[i],dmin));
+  for (int i = 0; i < N; i++) {
+    dmax = std::max(D[i],dmax);
+    dmin = std::min(D[i],dmin);
+  }
+
+  int ichk = 0;
+  if (dmax<0 || dmin<0) {
+    ichk = 1;
+    verbose = 1;
   }
   
   if (verbose && platform->comm.mpiRank == 0) {
@@ -99,6 +105,9 @@ void triDiagEig(int N, dfloat* D, dfloat* E, dfloat &dmin, dfloat &dmax)
       printf("Ritz Value by LAPACK %d / %d   %.6e\n", i+1, N, D[i]);
     }
   }
+
+  nrsCheck(ichk, platform->comm.mpiComm, EXIT_FAILURE,
+           "%s\n", "negative eigenvalues!");
 
   delete [] WORK;
     

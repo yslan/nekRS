@@ -39,8 +39,8 @@ void initializePchebData(elliptic_t* elliptic) {
    elliptic->pchebData = pchebData;
 } 
 
-static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
-                            int niter, dfloat dmin, dfloat dmax, int restart) {
+static void ChebyshevSolver_v2(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
+                               int niter, dfloat dmin, dfloat dmax, int restart) {
 
   mesh_t* mesh = elliptic->mesh;
   setupAide& options = elliptic->options;
@@ -103,9 +103,6 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
       rdotr = platform->linAlg->weightedNorm2Many(
            Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
          * sqrt(resNormFactor);
-//      const dfloat zdotr = sqrt(platform->linAlg->weightedInnerProdMany(
-//           Nlocal, Nfields, offset, o_weight, o_r, o_Ap, platform->comm.mpiComm))
-//         * sqrt(resNormFactor);      
       if (platform->comm.mpiRank == 0) {
         printf("CHEB it %d r norm %.8e \n",k+restart,rdotr);
       }
@@ -125,6 +122,112 @@ static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memor
   if(!options.compareArgs("PRECONDITIONER", "NONE")) {
     ellipticPreconditioner(elliptic, o_z, o_x);
   }
+}
+
+static void ChebyshevSolver(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
+                            int niter, dfloat dmin, dfloat dmax, int restart) {
+
+  mesh_t* mesh = elliptic->mesh;
+  setupAide& options = elliptic->options;
+  const int verbose = platform->options.compareArgs("VERBOSE", "TRUE");
+
+  const dfloat theta = 0.5 * (dmax + dmin);
+  const dfloat delta = 0.5 * (dmax - dmin);
+  const dfloat invTheta = 1.0 / theta;
+
+  const dfloat sigma = theta / delta;
+  dfloat rho_prev = 1. / sigma;
+
+  const dfloat one = 1., mone = -1., zero = 0.0;
+  const dlong Nlocal = mesh->Nlocal;
+  const int Nfields = elliptic->Nfields;
+  const dlong offset = elliptic->fieldOffset;
+
+  occa::memory &o_d = elliptic->o_p;
+//  occa::memory &o_w = elliptic->o_tmp; //FIXME
+  occa::memory &o_z = (!options.compareArgs("PRECONDITIONER", "NONE")) ? elliptic->o_z : o_r;
+  occa::memory &o_Ap = elliptic->o_Ap;
+  occa::memory &o_weight = elliptic->o_invDegree;
+  dfloat resNormFactor = elliptic->resNormFactor;
+  dfloat rdotr, rdotz;
+
+  dfloat ckp1,ck,ckm1;
+
+  if (restart==0) {
+    // r = r - A x, x0 = 0
+    platform->linAlg->scaleMany(Nlocal, Nfields, offset, zero, o_x); // x = 0 * x
+  
+    // z = Minv r
+    if(!options.compareArgs("PRECONDITIONER", "NONE")) {
+      ellipticPreconditioner(elliptic, o_r, o_z);
+    }
+
+    // Only compute norm in verbose mode
+    if (verbose) {
+      rdotr = platform->linAlg->weightedNorm2Many(
+            Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
+          * sqrt(resNormFactor);
+      rdotz = sqrt(platform->linAlg->weightedInnerProdMany(
+            Nlocal, Nfields, offset, o_weight, o_r, o_z, platform->comm.mpiComm))
+          * sqrt(resNormFactor);      
+      if (platform->comm.mpiRank == 0) {
+        printf("CHEB it %d r norm %.8e  rdotz=%.8e \n",0,rdotr,rdotz);
+      }
+    }
+    
+    // d = 0 * d + invTheta * r
+    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, invTheta, o_z, zero, o_d);
+//    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, one, o_z, zero, o_d);
+  }
+
+  ckm1 = 1.0;
+  ck = sigma;
+
+  for (int k = 1; k <= niter; k++) {
+    // x = x + d
+    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, one, o_d, one, o_x);   
+
+    // r = r - A d
+    ellipticOperator(elliptic, o_d, o_Ap, dfloatString);
+    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, mone, o_Ap, one, o_r);
+    
+    // z = Minv r
+    if(!options.compareArgs("PRECONDITIONER", "NONE")) {
+      ellipticPreconditioner(elliptic, o_r, o_z);
+    }
+
+    // Only compute norm in verbose mode
+    if (verbose) {
+      rdotr = platform->linAlg->weightedNorm2Many(
+           Nlocal, Nfields, offset, o_weight, o_r, platform->comm.mpiComm)
+         * sqrt(resNormFactor);
+      rdotz = sqrt(platform->linAlg->weightedInnerProdMany(
+           Nlocal, Nfields, offset, o_weight, o_r, o_z, platform->comm.mpiComm))
+         * sqrt(resNormFactor);
+      if (platform->comm.mpiRank == 0) {
+        printf("CHEB it %d r norm %.8e  rdotz=%.8e \n",k,rdotr,rdotz);
+      }
+    }
+    const dfloat rho = 1.0 / (2.0 * sigma - rho_prev);
+    const dfloat rCoeff = 2.0 * rho / delta;
+    const dfloat dCoeff = rho * rho_prev;
+    // d = rho*rho_prev * d + 2 * rho / delta * r
+    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, rCoeff, o_z, dCoeff, o_d);    
+    rho_prev = rho;
+/*
+    ckp1 = 2*sigma*ck - ckm1;
+    const dfloat wkp1 = 2.0 * sigma * ck / ckp1;
+    const dfloat rCoeff = wkp1 / theta;
+    const dfloat dCoeff = (wkp1-1.0);
+    platform->linAlg->axpbyMany(Nlocal, Nfields, offset, rCoeff, o_z, dCoeff, o_d);    
+
+    ckm1 = ck;
+    ck = ckp1;
+*/
+  }
+
+  // x = x + d
+  platform->linAlg->axpbyMany(Nlocal, Nfields, offset, one, o_d, one, o_x);
 }
 
 int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
@@ -180,7 +283,7 @@ int chebyshev_aux(elliptic_t* elliptic, occa::memory &o_r, occa::memory &o_x,
       elliptic->pcgEigenData->isEigenReady = 1;
       if (issave==1 && platform->comm.mpiRank == 0) {
         printf("%s Chebyshev step=%d update eigen: dmin %.6e dmax %.6e\n"
-          ,elliptic->name.c_str(),tstep,dmin,dmax);
+          ,elliptic->name.c_str(),tstep,elliptic->pcgEigenData->dmin,elliptic->pcgEigenData->dmax);
       }
     }
   }
