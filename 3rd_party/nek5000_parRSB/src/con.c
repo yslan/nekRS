@@ -9,15 +9,15 @@ int NEIGHBOR_MAP[GC_MAX_VERTICES][GC_MAX_NEIGHBORS] = {
     {1, 2, 4}, {0, 3, 5}, {0, 3, 6}, {1, 2, 7},
     {0, 5, 6}, {1, 4, 7}, {2, 4, 7}, {3, 5, 6}};
 
-void debug_print(struct comm *c, int verbose, const char *fmt, ...) {
+void debug_print(const struct comm *c, int verbose, const char *fmt, ...) {
   comm_barrier(c);
   va_list vargs;
-  va_start(vargs, fmt);
   if (c->id == 0 && verbose > 0) {
+    va_start(vargs, fmt);
     vprintf(fmt, vargs);
+    va_end(vargs);
     fflush(stdout);
   }
-  va_end(vargs);
 }
 
 double diff_sqr(double x, double y) { return (x - y) * (x - y); }
