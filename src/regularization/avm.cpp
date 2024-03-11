@@ -139,6 +139,8 @@ occa::memory computeEps(nrs_t *nrs, const dfloat time, const dlong scalarIndex, 
 
     cds->strongAdvectionVolumeKernel(cds->meshV->Nelements,
                                      1,
+                                     0,
+                                     mesh->o_LMM,
                                      cds->meshV->o_vgeo,
                                      mesh->o_D,
                                      cds->o_compute + scalarIndex * sizeof(dlong),
