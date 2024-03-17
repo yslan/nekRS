@@ -1,15 +1,18 @@
 #include "sort-impl.h"
 #include <math.h>
 
-static void init_probes(struct hypercube *data, const struct comm *c) {
-  struct sort *input = data->data;
+struct hypercube {
+  struct sort *data;
+  int nprobes;
+  double *probes;
+  ulong *probe_cnt;
+};
 
+static void init_probes(struct hypercube *data, const struct comm *c) {
   // Allocate space for probes and counts.
   int nprobes = data->nprobes = 3;
-  if (!data->probes)
-    data->probes = tcalloc(double, nprobes);
-  if (!data->probe_cnt)
-    data->probe_cnt = tcalloc(ulong, nprobes);
+  if (!data->probes) data->probes = tcalloc(double, nprobes);
+  if (!data->probe_cnt) data->probe_cnt = tcalloc(ulong, nprobes);
 
   double extrema[2];
   get_extrema((void *)extrema, data->data, 0, c);
@@ -27,15 +30,13 @@ static void update_probe_counts(struct hypercube *data, const struct comm *c) {
   gs_dom t = input->t[0];
 
   uint nprobes = data->nprobes;
-  for (uint i = 0; i < nprobes; i++)
-    data->probe_cnt[i] = 0;
+  for (uint i = 0; i < nprobes; i++) data->probe_cnt[i] = 0;
 
   struct array *a = input->a;
   for (uint e = 0; e < a->n; e++) {
     double val = get_scalar(a, e, offset, input->unit_size, t);
     for (uint i = 0; i < nprobes; i++) {
-      if (val < data->probes[i])
-        data->probe_cnt[i]++;
+      if (val < data->probes[i]) data->probe_cnt[i]++;
     }
   }
 
@@ -45,11 +46,11 @@ static void update_probe_counts(struct hypercube *data, const struct comm *c) {
 
 static void update_probes(slong nelem, double *probes, ulong *probe_cnt,
                           uint threshold) {
+  assert(nelem >= 0);
   slong expected = nelem / 2;
-  if (llabs(expected - (slong)probe_cnt[1]) < threshold)
-    return;
+  if (llabs(expected - (slong)probe_cnt[1]) < threshold) return;
 
-  if (probe_cnt[1] < expected)
+  if (probe_cnt[1] < (ulong)expected)
     probes[0] = probes[1];
   else
     probes[2] = probes[1];
@@ -79,37 +80,32 @@ static void transfer_elem(const struct hypercube *data, const struct comm *c) {
   slong lelem = out[1][0], uelem = out[1][1];
 
   uint np = c->np, lnp = np / 2;
-  uint *proc = tcalloc(uint, size);
-  set_proc_from_idx(proc, lnp, lstart, lown, lelem);
-  set_proc_from_idx(proc + lown, np - lnp, ustart, uppern, uelem);
+  uint *proc1 = set_proc_from_idx(lnp, lstart, lown, lelem);
+  uint *proc2 = set_proc_from_idx(np - lnp, ustart, uppern, uelem);
+  proc1 = trealloc(uint, proc1, size);
+  for (uint e = lown; e < size; e++) proc1[e] = proc2[e - lown] + lnp;
 
-  for (uint e = lown; e < size; e++)
-    proc[e] += lnp;
-
-  sarray_transfer_chunk(a, usize, proc, c);
-  free(proc);
+  sarray_transfer_chunk(a, usize, proc1, c);
+  free(proc1), free(proc2);
 }
 
 // TODO: Get rid of this recursive implementation.
-void parallel_hypercube_sort(struct hypercube *data, const struct comm *c) {
+static void parallel_hypercube_sort_aux(struct hypercube *data,
+                                        const struct comm *c) {
   struct sort *input = data->data;
   struct array *a = input->a;
-  gs_dom t = input->t[0];
-  uint offset = input->offset[0];
 
+  // FIXME: Replace comm_scan() by comm_allreduce().
   slong out[2][1], buf[2][1], in = a->n;
   comm_scan(out, c, gs_long, gs_add, &in, 1, buf);
-  slong start = out[0][0];
   slong nelem = out[1][0];
 
   uint threshold = nelem / (10 * c->np);
-  if (threshold < 2)
-    threshold = 2;
+  if (threshold < 2) threshold = 2;
 
   sort_local(data->data);
 
-  if (c->np == 1)
-    return;
+  if (c->np == 1) return;
 
   init_probes(data, c);
   update_probe_counts(data, c);
@@ -129,7 +125,18 @@ void parallel_hypercube_sort(struct hypercube *data, const struct comm *c) {
   comm_split(c, lower, c->id, &nc);
 
   // TODO: Keep load balancing after each split
-  parallel_hypercube_sort(data, &nc);
+  parallel_hypercube_sort_aux(data, &nc);
 
   comm_free(&nc);
+}
+
+void parallel_hypercube_sort(struct sort *sd, const struct comm *c) {
+  struct comm dup;
+  comm_dup(&dup, c);
+
+  struct hypercube hdata = {.data = sd, .probes = NULL, .probe_cnt = NULL};
+  parallel_hypercube_sort_aux(&hdata, &dup);
+  free(hdata.probes), free(hdata.probe_cnt);
+
+  comm_free(&dup);
 }

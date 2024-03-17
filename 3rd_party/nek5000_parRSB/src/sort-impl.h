@@ -6,24 +6,28 @@
 double get_scalar(struct array *a, uint i, uint offset, uint usize,
                   gs_dom type);
 
-void get_extrema(void *extrema_, struct sort *data, uint field,
-                 const struct comm *c);
-
-void set_proc_from_idx(uint *proc, uint size, sint np, slong start,
-                       slong nelem);
-
-void sort_local(struct sort *s);
+uint *set_proc_from_idx(uint size, sint np, slong start, slong nelem);
 
 void sarray_transfer_chunk(struct array *arr, const size_t usize,
                            const uint *proc, const struct comm *c);
 
-struct hypercube {
-  struct sort *data;
-  int nprobes;
-  double *probes;
-  ulong *probe_cnt;
+struct sort {
+  struct array *a;
+  size_t unit_size, align;
+
+  int nfields;
+  gs_dom t[3];
+  uint offset[3];
+
+  buffer *buf;
 };
-void parallel_hypercube_sort(struct hypercube *data, const struct comm *c);
+
+void sort_local(struct sort *s);
+
+void get_extrema(void *extrema_, struct sort *data, uint field,
+                 const struct comm *c);
+
+void parallel_hypercube_sort(struct sort *s, const struct comm *c);
 
 void parallel_bin_sort(struct sort *s, const struct comm *c);
 

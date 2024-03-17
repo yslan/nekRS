@@ -2,22 +2,21 @@
 #include <float.h>
 #include <math.h>
 
+extern void parrsb_print(const struct comm *c, int verbose, const char *fmt,
+                         ...);
+
 double get_scalar(struct array *a, uint i, uint offset, uint usize,
                   gs_dom type) {
   char *v = (char *)a->ptr + i * usize + offset;
 
   double data;
   switch (type) {
-  case gs_int:
-    data = *((uint *)v);
-    break;
-  case gs_long:
-    data = *((ulong *)v);
-    break;
-  case gs_double:
-    data = *((double *)v);
-    break;
+  case gs_int: data = *((uint *)v); break;
+  case gs_long: data = *((ulong *)v); break;
+  case gs_double: data = *((double *)v); break;
   default:
+    fprintf(stderr, "Error: Unknown type %d\n", type);
+    exit(EXIT_FAILURE);
     break;
   }
 
@@ -46,26 +45,28 @@ void get_extrema(void *extrema_, struct sort *data, uint field,
   extrema[0] *= -1;
 }
 
-void set_proc_from_idx(uint *proc, uint size, sint np, slong start,
-                       slong nelem) {
-  if (nelem == 0)
-    return;
+uint *set_proc_from_idx(uint size, sint np_, slong start, slong nelem) {
+  if (nelem == 0) return NULL;
+  uint *proc = tcalloc(uint, size + 1);
 
-  uint nelt = nelem / np, nrem = nelem - np * nelt;
+  ulong np = np_;
+  ulong nelt = nelem / np, nrem = nelem - np * nelt;
+  assert(nrem < np);
   if (nrem == 0) {
-    for (uint i = 0; i < size; i++) {
-      proc[i] = (start + i) / nelt;
-    }
+    for (uint i = 0; i < size; i++) proc[i] = (uint)((start + i) / nelt);
   } else {
-    uint s = np - nrem;
-    slong t = nelt * s;
+    ulong s = np - nrem;
+    ulong t1 = nelt * s;
     for (uint i = 0; i < size; i++) {
-      if (start + i < t)
-        proc[i] = (start + i) / nelt;
+      ulong spi = start + i;
+      if (spi < t1)
+        proc[i] = (uint)(spi / nelt);
       else
-        proc[i] = s + (start + i - t) / (nelt + 1);
+        proc[i] = (uint)s + (uint)((spi - t1) / (nelt + 1));
     }
   }
+
+  return proc;
 }
 
 static int sort_field(struct array *arr, size_t usize, gs_dom t, uint off,
@@ -85,8 +86,7 @@ static int sort_field(struct array *arr, size_t usize, gs_dom t, uint off,
   case gs_int: // FIXME gs_uint
     gslib_sortp_ui(buf, keep, (uint *)((char *)ptr + off), nunits, usize);
     break;
-  default:
-    break;
+  default: break;
   }
 
   return 0;
@@ -99,18 +99,17 @@ void sort_local(struct sort *s) {
   int i = s->nfields - 1;
 
   sort_field(a, usize, s->t[i], s->offset[i], buf, 0), i--;
-  while (i >= 0)
-    sort_field(a, usize, s->t[i], s->offset[i], buf, 1), i--;
+  while (i >= 0) sort_field(a, usize, s->t[i], s->offset[i], buf, 1), i--;
   sarray_permute_buf_(s->align, usize, a->ptr, a->n, buf);
 }
 
 static int load_balance(struct array *a, size_t size, const struct comm *c) {
-  slong out[2][1], buf[2][1], in = a->n;
-  comm_scan(out, c, gs_long, gs_add, &in, 1, buf);
+  slong out[2][1], wrk[2][1], in = a->n;
+  comm_scan(out, c, gs_long, gs_add, &in, 1, wrk);
   slong start = out[0][0], nelem = out[1][0];
 
-  uint *proc = tcalloc(uint, a->n + 1);
-  set_proc_from_idx(proc, a->n, c->np, start, nelem);
+  parrsb_print(c, 0, "\t\t\tstart = %lld, nelem = %lld", start, nelem);
+  uint *proc = set_proc_from_idx(a->n, c->np, start, nelem);
   sarray_transfer_chunk(a, size, proc, c);
   free(proc);
 
@@ -122,8 +121,7 @@ void sarray_transfer_chunk(struct array *arr, const size_t usize,
   // Calculate the global array size. If it is zero, nothing to do, just return.
   slong ng = arr->n, wrk[2];
   comm_allreduce(c, gs_long, gs_add, &ng, 1, wrk);
-  if (ng == 0)
-    return;
+  if (ng == 0) return;
 
   // Initialize the crystal router.
   struct crystal cr;
@@ -131,15 +129,15 @@ void sarray_transfer_chunk(struct array *arr, const size_t usize,
 
   // Allocate `proc` with some buffer space.
   uint *proc = tcalloc(uint, arr->n + 1);
-  for (uint i = 0; i < arr->n; i++)
-    proc[i] = proci[i];
+  for (uint i = 0; i < arr->n; i++) proc[i] = proci[i];
 
   // Transfer the array elements to destination processor. To avoid message
   // sizes larger than INT_MAX, we calculate total message size and then figure
   // out how many transfers we need. Then we transfer array using that many
   // transfers.
-  slong msg_size = INT_MAX;
+  slong msg_size = 9 * (INT_MAX / 10);
   uint nt = (ng * usize + msg_size - 1) / msg_size;
+  parrsb_print(c, 0, "\t\t\tmsg_size = %lld, nt = %u", msg_size, nt);
   uint tsize = (arr->n + nt - 1) / nt;
 
   struct array brr, crr;
@@ -147,19 +145,29 @@ void sarray_transfer_chunk(struct array *arr, const size_t usize,
   array_init_(&crr, arr->n + 1, usize, __FILE__, __LINE__);
 
   char *pe = (char *)arr->ptr;
-  uint off = 0;
-  for (unsigned i = 0; i < nt; i++) {
+  uint off = 0, off1;
+  for (unsigned t = 0; t < nt; t++) {
     // Copy a chunk from `arr` to `brr`.
-    brr.n = 0;
-    uint off1 = off + tsize;
+    brr.n = 0, off1 = off + tsize;
+    assert(off <= arr->n);
     for (uint j = off; j < arr->n && j < off1; j++)
       array_cat_(usize, &brr, &pe[j * usize], 1, __FILE__, __LINE__);
-    assert(off <= arr->n);
+
     // Transfer the chunk in `brr` to the destination.
     sarray_transfer_ext_(&brr, usize, &proc[off], sizeof(uint), &cr);
+
     // Append the received chunk to `crr`.
     array_cat_(usize, &crr, brr.ptr, brr.n, __FILE__, __LINE__);
     off = (off1 < arr->n ? off1 : arr->n);
+
+    // Some debug printing.
+    slong cmax = crr.n, bmax = brr.n, cmin = crr.n, bmin = brr.n;
+    comm_allreduce(c, gs_long, gs_max, &cmax, 1, wrk);
+    comm_allreduce(c, gs_long, gs_max, &bmax, 1, wrk);
+    comm_allreduce(c, gs_long, gs_min, &cmin, 1, wrk);
+    comm_allreduce(c, gs_long, gs_min, &bmin, 1, wrk);
+    parrsb_print(c, 0, "\t\t\t %d/%d brr.n = %u/%lld/%lld crr.n = %u/%lld/%lld",
+                 t, nt, brr.n, bmin, bmax, crr.n, cmin, cmax);
   }
   array_free(&brr);
 
@@ -171,35 +179,35 @@ void sarray_transfer_chunk(struct array *arr, const size_t usize,
   crystal_free(&cr);
 }
 
-void parallel_sort_private(struct sort *data, const struct comm *c) {
-  struct comm dup;
-  comm_dup(&dup, c);
+void parallel_sort_(struct array *arr, size_t usize, size_t align,
+                    unsigned algo, unsigned balance, const struct comm *c,
+                    buffer *bfr, unsigned nfields, ...) {
+  struct sort sd = {.a = arr, .unit_size = usize, .align = align};
+  sd.buf = bfr;
+  sd.nfields = nfields;
 
-  int balance = data->balance, algo = data->algo;
-  struct array *a = data->a;
-  size_t usize = data->unit_size;
+  va_list vargs;
+  va_start(vargs, nfields);
+  for (uint i = 0; i < nfields; i++) {
+    sd.t[i] = va_arg(vargs, gs_dom);
+    sd.offset[i] = va_arg(vargs, size_t);
+  }
+  va_end(vargs);
 
-  struct hypercube hdata;
+  // If there is only a single MPI process, just sort locally and return.
+  if (c->np == 1) {
+    sort_local(&sd);
+    return;
+  }
+
   switch (algo) {
-  case 0:
-    parallel_bin_sort(data, c);
-    break;
-  case 1:
-    hdata.data = data;
-    hdata.probes = NULL;
-    hdata.probe_cnt = NULL;
-    parallel_hypercube_sort(&hdata, &dup);
-    free(hdata.probes);
-    free(hdata.probe_cnt);
-    break;
-  default:
-    break;
+  case 0: parallel_bin_sort(&sd, c); break;
+  case 1: parallel_hypercube_sort(&sd, c); break;
+  default: break;
   }
 
   if (balance) {
-    load_balance(a, usize, c);
-    sort_local(data);
+    load_balance(sd.a, sd.unit_size, c);
+    sort_local(&sd);
   }
-
-  comm_free(&dup);
 }
