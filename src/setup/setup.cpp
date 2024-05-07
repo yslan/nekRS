@@ -192,14 +192,12 @@ void nrsSetup(MPI_Comm comm, setupAide &options, nrs_t *nrs)
              "%s\n",
              "Conjugate heat transfer requires a temperature field!");
 
-#if 0
     bool coupled = neknekCoupled();
     nrsCheck(nelgt != nelgv && coupled,
              platform->comm.mpiComm,
              EXIT_FAILURE,
              "%s\n",
              "Conjugate heat transfer + neknek not supported!");
-#endif
   }
 
   // init nek

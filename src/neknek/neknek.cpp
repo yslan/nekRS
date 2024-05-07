@@ -11,8 +11,6 @@ namespace {
 
 std::vector<std::string> neknekSolveFields(){
   auto fields = fieldsToSolve(platform->options);
-
-  fields.erase(std::remove(fields.begin(), fields.end(), "velocity"), fields.end());
   
   // mesh velocity is "derived" from fluid velocity, so it is not relevant here
   fields.erase(std::remove(fields.begin(), fields.end(), "mesh"), fields.end());
@@ -84,7 +82,7 @@ void updateInterpPoints(nrs_t *nrs)
   const dlong nsessions = neknek->nsessions;
   const dlong sessionID = neknek->sessionID;
 
-  auto *mesh = nrs->_mesh;
+  auto *mesh = nrs->meshV;
 
   // Setup findpts
   const dfloat tol = 5e-13;
@@ -154,7 +152,7 @@ void updateInterpPoints(nrs_t *nrs)
 
 dlong computeNumInterpPoints(nrs_t *nrs)
 {
-  auto *mesh = nrs->_mesh;
+  auto *mesh = nrs->meshV;
   auto fields = neknekSolveFields();
 
   if(fields.size() == 0) return 0;
@@ -177,7 +175,7 @@ void findInterpPoints(nrs_t *nrs)
   const dlong nsessions = neknek->nsessions;
   const dlong sessionID = neknek->sessionID;
 
-  auto *mesh = nrs->_mesh;
+  auto *mesh = nrs->meshV;
 
   // Setup findpts
   const dfloat tol = 5e-13;
@@ -420,7 +418,7 @@ void neknek_t::updateBoundary(nrs_t *nrs, int tstep, int stage)
 
   // lag state, update timestepper coefficients and compute extrapolated state
   if (stage == 1) {
-    auto *mesh = nrs->_mesh;
+    auto *mesh = nrs->meshV;
     int extOrder = std::min(tstep, this->nEXT);
     int bdfOrder = std::min(tstep, nrs->nBDF);
     nek::extCoeff(this->coeffEXT.data(), nrs->dt, extOrder, bdfOrder);
