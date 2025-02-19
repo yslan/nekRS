@@ -4,8 +4,11 @@
 : ${QUEUE:="batch"}
 : ${NEKRS_HOME:="$HOME/.local/nekrs"}
 : ${NEKRS_CACHE_BCAST:=1}
-: ${NEKRS_SKIP_BUILD_ONLY:=0}
+: ${RUN_ONLY:=0}
+: ${BUILD_ONLY:=0}
+: ${OPT_ARGS:=""}
 
+echo "using $NEKRS_HOME"
 export NVME_HOME="/mnt/bb/$USER/"
 
 if [ $# -ne 3 ]; then
@@ -23,6 +26,11 @@ if [ -z "$QUEUE" ]; then
   exit 1
 fi
 
+extra_args=""
+if [ ! -z "$OPT_ARGS" ]; then
+  extra_args="${OPT_ARGS}"
+fi
+
 bin=${NEKRS_HOME}/bin/nekrs
 case=$1
 nodes=$2
@@ -30,8 +38,14 @@ gpu_per_node=8
 cores_per_numa=7
 let nn=$nodes*$gpu_per_node
 let ntasks=nn
-time=$3
+time=$3":00"
 backend=HIP
+prefix="nekRS_"
+qnodes=$nodes
+if [ $BUILD_ONLY -eq 1 ]; then
+  qnodes=1
+  prefix=$prefix"build_"
+fi
 
 time_fmt=`echo $time|tr ":" " "|awk '{print NF}'`
 if [ "$time_fmt" -ne "3" ]; then
@@ -50,15 +64,24 @@ if [ ! -f $case.par ]; then
   exit 1
 fi
 
-if [ ! -f $case.udf ]; then
-  echo "Cannot find" $case.udf
-  exit 1
+chkudf=`grep -i "^udf" $case.par`
+if [ -z "${chkudf}" ]; then
+  if [ ! -f $case.udf ]; then
+    echo "Cannot find" $case.udf
+    exit 1
+  fi
+else
+  udfpath=`grep -i "^udf" $case.par|tr "\"" " "|tr "=" " "|awk '{print $2}'`
+  if [ ! -f $udfpath ]; then
+    echo "Cannot find" $udfpath
+    exit 1
+  fi
 fi
 
-if [ ! -f $case.re2 ]; then
-  echo "Cannot find" $case.re2
-  exit 1
-fi
+#if [ ! -f $case.re2 ]; then
+#  echo "Cannot find" $case.re2
+#  exit 1
+#fi
 
 striping_unit=16777216
 max_striping_factor=400
@@ -77,10 +100,10 @@ MPICH_MPIIO_HINTS="*:cray_cb_write_lock_mode=2:cray_cb_nodes_multiplier=4:stripi
 SFILE=s.bin
 echo "#!/bin/bash" > $SFILE
 echo "#SBATCH -A $PROJ_ID" >>$SFILE
-echo "#SBATCH -J nekRS_$case" >>$SFILE
+echo "#SBATCH -J $prefix$case" >>$SFILE
 echo "#SBATCH -o %x-%j.out" >>$SFILE
 echo "#SBATCH -t $time" >>$SFILE
-echo "#SBATCH -N $nodes" >>$SFILE
+echo "#SBATCH -N $qnodes" >>$SFILE
 echo "#SBATCH -p $QUEUE" >>$SFILE
 echo "#SBATCH -C nvme" >>$SFILE
 echo "#SBATCH --exclusive" >>$SFILE
@@ -142,14 +165,16 @@ echo "ls -ltra $NVME_HOME" >> $SFILE
 echo "ls -ltra $bin_nvme_libs" >> $SFILE
 echo "ldd $bin_nvme" >> $SFILE
 
-if [ $NEKRS_SKIP_BUILD_ONLY -eq 0 ]; then
+if [ $RUN_ONLY -eq 0 ]; then
 echo "# precompilation" >>$SFILE
-echo "srun -N 1 -n 1 $bin_nvme --backend $backend --device-id 0 --setup $case --build-only $ntasks" >>$SFILE
+echo "srun -N 1 -n 1 $bin_nvme --backend $backend --device-id 0 $extra_args --setup $case --build-only $ntasks" >>$SFILE
 fi
 echo "" >> $SFILE
 
+if [ $BUILD_ONLY -eq 0 ]; then
 echo "# actual run" >>$SFILE
-echo "srun -N $nodes -n $ntasks $bin_nvme --backend $backend --device-id 0 --setup $case" >>$SFILE
+echo "srun -N $nodes -n $ntasks $bin_nvme --backend $backend --device-id 0 $extra_args --setup $case" >>$SFILE
+fi
 
 sbatch $SFILE
 
