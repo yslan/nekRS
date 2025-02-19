@@ -6,6 +6,7 @@
 #if OCCA_DPCPP_ENABLED
 #include <sycl.hpp>
 #else
+#include <cstdint> // GCC13, fix https://github.com/libocca/occa/pull/684
 #include <vector>
 namespace sycl {
 
