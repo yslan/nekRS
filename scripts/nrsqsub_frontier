@@ -125,7 +125,7 @@ echo "rocm-smi --showpids" >>$SFILE
 
 echo "squeue -u \$USER" >>$SFILE
 
-echo "export MPICH_GPU_SUPPORT_ENABLED=0" >>$SFILE
+echo "export MPICH_GPU_SUPPORT_ENABLED=1" >>$SFILE
 
 ## These must be set before compiling so the executable picks up GTL
 echo "export PE_MPICH_GTL_DIR_amd_gfx90a=\"-L${CRAY_MPICH_ROOTDIR}/gtl/lib\"" >> $SFILE
@@ -133,7 +133,7 @@ echo "export PE_MPICH_GTL_LIBS_amd_gfx90a=\"-lmpi_gtl_hsa\"" >> $SFILE
 
 echo "ulimit -s unlimited " >>$SFILE
 echo "export NEKRS_HOME=$NEKRS_HOME" >>$SFILE
-echo "export NEKRS_GPU_MPI=1 " >>$SFILE
+echo "export NEKRS_GPU_MPI=0 " >>$SFILE
 
 echo "export NVME_HOME=$NVME_HOME" >>$SFILE
 
