@@ -1948,8 +1948,7 @@ c-----------------------------------------------------------------------
       real*4 w2
 
       integer vi(2+lrbs_loc,lelt) ! [nid,iel,(data real*8)] x nelt
-      real*8 cr_etime1,cr_etime2,cr_etime3,etime0,dnekclock_sync
-      common /cr_rst_tmr/ cr_etime1,cr_etime2,cr_etime3
+      real*8 etime0,dnekclock_sync
 
       integer e,ei
       logical iskip
@@ -1992,11 +1991,13 @@ c-----------------------------------------------------------------------
             endif
             
             if(ierr.eq.0) then
+              etime0 = dnekclock_sync()
               if(ifmpiio) then
                 call byte_read_mpi(w2,nxyzr*nelrr,-1,ifh_mbyte,ierr)
               else
                 call byte_read (w2,nxyzr*nelrr,ierr)
               endif
+              rst_etime(1) = rst_etime(1) + dnekclock_sync() - etime0
             endif
 
 #ifdef MPI
@@ -2013,7 +2014,7 @@ c-----------------------------------------------------------------------
                  iloc = iloc+1
                  l = l+nxyzr
               enddo
-              cr_etime1 = cr_etime1 + dnekclock_sync() - etime0
+              rst_etime(2) = rst_etime(2) + dnekclock_sync() - etime0
 
               ! crystal route nr real items of size lrs to rank vi(key,1:nr)
               nrmax = lelt
@@ -2023,7 +2024,7 @@ c-----------------------------------------------------------------------
               etime0 = dnekclock_sync()
               call fgslib_crystal_tuple_transfer(cr_mfi,n,nrmax,vi,li,
      &                 vl,0,vr,0,key)
-              cr_etime2 = cr_etime2 + dnekclock_sync() - etime0
+              rst_etime(3) = rst_etime(3) + dnekclock_sync() - etime0
 
               ! unpack buffer
               etime0 = dnekclock_sync()
@@ -2038,10 +2039,11 @@ c-----------------------------------------------------------------------
                  call icopy (wk(l),vi(3,iloc),nxyzr)
               enddo
               call nekgsync()
-              cr_etime3 = cr_etime3 + dnekclock() - etime0
+              rst_etime(4) = rst_etime(4) + dnekclock_sync() - etime0
 
             else
 
+              etime0 = dnekclock_sync()
               l = 1
               call MPI_Win_lock_all(0,rsH,ierr)
               do e = k+1,k+nelrr
@@ -2055,6 +2057,7 @@ c-----------------------------------------------------------------------
               enddo
               call MPI_Win_unlock_all(rsH,ierr)
               call nekgsync()
+              rst_etime(3) = rst_etime(3) + dnekclock_sync() - etime0
 
             endif
 #endif
@@ -2132,8 +2135,7 @@ c-----------------------------------------------------------------------
       real*4 w2
 
       integer vi(2+lrbs_loc,lelt) ! [nid,iel,(data real*8)] x nelt
-      real*8 cr_etime1,cr_etime2,cr_etime3,etime0,dnekclock_sync
-      common /cr_rst_tmr/ cr_etime1,cr_etime2,cr_etime3
+      real*8 etime0,dnekclock_sync
 
       integer e,ei
       integer*8 i8tmp
@@ -2173,11 +2175,13 @@ c-----------------------------------------------------------------------
             endif
 
             if(ierr.eq.0) then
+              etime0 = dnekclock_sync()
               if(ifmpiio) then 
                 call byte_read_mpi(w2,nxyzr*nelrr,-1,ifh_mbyte,ierr)
               else
                 call byte_read (w2,nxyzr*nelrr,ierr)
               endif
+              rst_etime(1) = rst_etime(1) + dnekclock_sync() - etime0
             endif
 
 #ifdef MPI
@@ -2194,7 +2198,7 @@ c-----------------------------------------------------------------------
                  iloc = iloc+1
                  l = l+nxyzr
               enddo
-              cr_etime1 = cr_etime1 + dnekclock_sync() - etime0
+              rst_etime(2) = rst_etime(2) + dnekclock_sync() - etime0
 
               ! crystal route nr real items of size lrs to rank vi(key,1:nr)
               nrmax = lelt
@@ -2204,7 +2208,7 @@ c-----------------------------------------------------------------------
               etime0 = dnekclock_sync()
               call fgslib_crystal_tuple_transfer(cr_mfi,n,nrmax,vi,li,
      &                 vl,0,vr,0,key)
-              cr_etime2 = cr_etime2 + dnekclock_sync() - etime0
+              rst_etime(3) = rst_etime(3) + dnekclock_sync() - etime0
 
               ! unpack buffer
               etime0 = dnekclock_sync()
@@ -2218,11 +2222,12 @@ c-----------------------------------------------------------------------
                  l = (iel-1) * nxyzr + 1
                  call icopy (wk(l),vi(3,iloc),nxyzr)
               enddo
-              cr_etime3 = cr_etime3 + dnekclock_sync() - etime0
               call nekgsync()
+              rst_etime(4) = rst_etime(4) + dnekclock_sync() - etime0
 
             else
 
+              etime0 = dnekclock_sync()
               l = 1
               call MPI_Win_lock_all(0,rsH,ierr)
               do e = k+1,k+nelrr
@@ -2236,6 +2241,7 @@ c-----------------------------------------------------------------------
               enddo
               call MPI_Win_unlock_all(rsH,ierr)
               call nekgsync()
+              rst_etime(3) = rst_etime(3) + dnekclock_sync() - etime0
 
             endif
 #endif

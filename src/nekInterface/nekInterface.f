@@ -1344,18 +1344,19 @@ c-----------------------------------------------------------------------
 
       common /nekmpi/ nid_,np_,nekcomm,nekgroup,nekreal
 
-      real*8 cr_etime1,cr_etime2,cr_etime3,etime0,dnekclock_sync
-      common /cr_rst_tmr/ cr_etime1,cr_etime2,cr_etime3
+      real*8 etime0,dnekclock_sync
 
       integer   disp_unit
       integer*8 win_size
 
 #ifdef MPI
+      if(nio.eq.0) write(*,*)'restart ifcrrs=',ifcrrs
+      do i=1,4 ! mpiio / pack / transfer / unpack
+        rst_etime(i) = 0.0d0
+      enddo
+
       if (ifcrrs) then
         call fgslib_crystal_setup(cr_mfi,nekcomm,np)
-        cr_etime1 = 0.0
-        cr_etime2 = 0.0
-        cr_etime3 = 0.0
       else
         disp_unit = 4
         win_size  = int(disp_unit,8)*size(wk)
@@ -1425,12 +1426,14 @@ c-----------------------------------------------------------------------
 
 #ifdef MPI
       if (ifcrrs) then
-        if(nio.eq.0) write(6,31) cr_etime1,cr_etime2,cr_etime3
         call fgslib_crystal_free(cr_mfi)
       endif
+
+      etime0 = rst_etime(1)+rst_etime(2)+rst_etime(3)+rst_etime(4)
+      if(nio.eq.0) write(6,31) (rst_etime(i),i=1,4),etime0
 #endif
 
-  31  format(3x,'nekf_readfld:pack/cr/unpack :',3(1e9.2))
+  31  format(3x,'mfi:rd/pk/xfer/unpk/tot:',5(1e9.2))
 
       return
       end
