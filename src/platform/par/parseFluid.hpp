@@ -130,7 +130,9 @@ void parseFluidPhaseSections(const int rank, setupAide &options, inipp::Ini *ini
     return;
   }
 
-  for (auto const &sec : ini->sections) {
+  const auto mixtureSection = ini->sections["fluid velocity"];
+
+  for (auto &sec : ini->sections) {
     std::istringstream iss(sec.first);
     std::string firstWord, secondWord, thirdWord;
     iss >> firstWord >> secondWord >> thirdWord;
@@ -142,6 +144,17 @@ void parseFluidPhaseSections(const int rank, setupAide &options, inipp::Ini *ini
     if (phaseMap.find(thirdWord) == phaseMap.end()) {
       // already reported by validate(); skip here to avoid a second, confusing error
       continue;
+    }
+
+    // a phase inherits any key it doesn't set itself from the common [FLUID VELOCITY]
+    // section (e.g. boundarytypemap, so BC stays mixture-derived while mixed-BC math isn't
+    // ready); emplace is a no-op if the phase already set that key, so the phase's own
+    // value always wins once per-phase overrides (like mixed BC) are actually supported.
+    for (auto const &kv : mixtureSection) {
+      if (kv.first == "phases") {
+        continue;
+      }
+      sec.second.emplace(kv.first, kv.second);
     }
 
     parsePhaseVelocitySection(rank, options, ini, sec.first, thirdWord);
