@@ -22,10 +22,29 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
 
   const char nullChar[] = {'\0'};
 
-  velocityName = cfg.velocityName;
-  o_velocityName = platform->device.malloc<char>(velocityName.size() + 1);
-  o_velocityName.copyFrom(velocityName.data());
-  o_velocityName.copyFrom(nullChar, 1, velocityName.size());
+  // mixture-level velocity: option lookups below (SOLVER, BC, EXTRAPOLATION, ...) for the
+  // mixture fields (o_U, o_Ue, o_EToB, ...) stay keyed on this name, independent of whether
+  // phases are declared.
+  const std::string mixtureVelocityName = name + " velocity";
+
+  int nPhasesDeclared = 0;
+  platform->options.getArgs("NUMBER OF PHASES", nPhasesDeclared);
+  Nphase = std::max(nPhasesDeclared, 1);
+
+  velocityName = (nPhasesDeclared > 0) ? [&]() {
+    std::vector<std::string> names;
+    for (int i = 0; i < Nphase; i++) {
+      names.push_back("phase" + phaseDigitStr(i));
+    }
+    return names;
+  }() : cfg.velocityName;
+
+  o_velocityName.resize(Nphase);
+  for (int i = 0; i < Nphase; i++) {
+    o_velocityName[i] = platform->device.malloc<char>(velocityName[i].size() + 1);
+    o_velocityName[i].copyFrom(velocityName[i].data());
+    o_velocityName[i].copyFrom(nullChar, 1, velocityName[i].size());
+  }
 
   pressureName = cfg.pressureName;
   o_pressureName = platform->device.malloc<char>(pressureName.size() + 1);
@@ -46,10 +65,23 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
 
   o_U = platform->device.malloc<dfloat>(fieldOffsetSum * std::max(o_coeffBDF.size(), o_coeffEXT.size()));
 
-  if (!platform->options.compareArgs(upperCase(velocityName) + " EXTRAPOLATION", "FALSE")) {
+  if (!platform->options.compareArgs(upperCase(mixtureVelocityName) + " EXTRAPOLATION", "FALSE")) {
     o_Ue = platform->device.malloc<dfloat>(fieldOffsetSum);
   } else {
     o_Ue = o_U.slice(0, fieldOffsetSum);
+  }
+
+  o_U_phases.resize(Nphase);
+  o_Ue_phases.resize(Nphase);
+  for (int i = 0; i < Nphase; i++) {
+    o_U_phases[i] =
+        platform->device.malloc<dfloat>(fieldOffsetSum * std::max(o_coeffBDF.size(), o_coeffEXT.size()));
+
+    if (!platform->options.compareArgs(upperCase(velocityName[i]) + " EXTRAPOLATION", "FALSE")) {
+      o_Ue_phases[i] = platform->device.malloc<dfloat>(fieldOffsetSum);
+    } else {
+      o_Ue_phases[i] = o_U_phases[i].slice(0, fieldOffsetSum);
+    }
   }
 
   if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE")) {
@@ -90,29 +122,54 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
   o_mue = o_prop.slice(0 * fieldOffset, mesh->Nlocal);
   o_rho = o_prop.slice(1 * fieldOffset, mesh->Nlocal);
 
-  if (!platform->options.compareArgs(upperCase(velocityName) + " SOLVER", "NONE")) {
-    platform->app->bc->printBcTypeMapping(velocityName);
+  if (nPhasesDeclared > 0) {
+    o_rho_phases.resize(Nphase);
+    o_mue_phases.resize(Nphase);
+    o_alpha_phases.resize(Nphase);
+    for (int i = 0; i < Nphase; i++) {
+      auto o_propPhase = [&]() {
+        dfloat mue = 1;
+        dfloat rho = 1;
+        platform->options.getArgs(upperCase(velocityName[i]) + " VISCOSITY", mue);
+        platform->options.getArgs(upperCase(velocityName[i]) + " DENSITY", rho);
+        auto o_u = platform->device.malloc<dfloat>(2 * fieldOffset);
+        auto o_u0 = o_u + 0 * fieldOffset;
+        auto o_u1 = o_u + 1 * fieldOffset;
+        platform->linAlg->fill(mesh->Nlocal, mue, o_u0);
+        platform->linAlg->fill(mesh->Nlocal, rho, o_u1);
+        return o_u;
+      }();
+      o_mue_phases[i] = o_propPhase.slice(0 * fieldOffset, mesh->Nlocal);
+      o_rho_phases[i] = o_propPhase.slice(1 * fieldOffset, mesh->Nlocal);
 
-    if (platform->options.compareArgs(upperCase(velocityName) + " REGULARIZATION METHOD", "HPFRT")) {
+      o_alpha_phases[i] = platform->device.malloc<dfloat>(fieldOffset);
+    }
+  }
+
+  if (!platform->options.compareArgs(upperCase(mixtureVelocityName) + " SOLVER", "NONE")) {
+    platform->app->bc->printBcTypeMapping(mixtureVelocityName);
+
+    if (platform->options.compareArgs(upperCase(mixtureVelocityName) + " REGULARIZATION METHOD", "HPFRT")) {
       int nModes = -1;
-      platform->options.getArgs(upperCase(velocityName) + " HPFRT MODES", nModes);
+      platform->options.getArgs(upperCase(mixtureVelocityName) + " HPFRT MODES", nModes);
       o_filterRT = lowPassFilterSetup(mesh, nModes);
     }
 
     o_EToB = [&]() {
-      auto u = mesh->createEToB([&](int bID) -> int { return platform->app->bc->typeId(bID, velocityName); });
+      auto u =
+          mesh->createEToB([&](int bID) -> int { return platform->app->bc->typeId(bID, mixtureVelocityName); });
       auto o_u = platform->device.malloc<int>(u.size());
       o_u.copyFrom(u.data());
       return o_u;
     }();
 
     auto verifyBC = [&]() {
-      nekrsCheck(mesh->Nbid != platform->app->bc->size(velocityName),
+      nekrsCheck(mesh->Nbid != platform->app->bc->size(mixtureVelocityName),
                  platform->comm.mpiComm(),
                  EXIT_FAILURE,
                  "Size of %s boundaryTypeMap (%d) does not match number of boundary IDs in mesh (%d)!\n",
-                 velocityName.c_str(),
-                 platform->app->bc->size(velocityName),
+                 mixtureVelocityName.c_str(),
+                 platform->app->bc->size(mixtureVelocityName),
                  mesh->Nbid);
 
       platform->app->bc->checkAlignment(mesh);

@@ -7,7 +7,7 @@
 class fluidSolverCfg_t : public solverCfg_t
 {
 public:
-  std::string velocityName;
+  std::vector<std::string> velocityName;
   std::string pressureName;
   dlong fieldOffset;
   dlong cubatureOffset;
@@ -17,17 +17,17 @@ class fluidSolver_t : public solver_t
 {
 private:
   void solvePressure(double time, int stage);
-  void solveVelocity(double time, int stage);
+  void solveVelocity(double time, int stage, int phase);
 
-  void advectionSubcycling(int nEXT, double time);
+  void advectionSubcycling(int nEXT, double time, int phase); // TODO
 
   occa::memory o_zeroNormalMask;
   occa::memory o_filterRT;
   int Nsubsteps;
 
-  occa::memory o_ADV;
+  occa::memory o_ADV; // TODO phases
 
-  occa::memory o_U0;
+  occa::memory o_U0; // mixture
   occa::memory o_P0;
   occa::memory o_relUrst0;
   occa::memory o_prop0;
@@ -86,13 +86,15 @@ public:
   void applyDirichlet(double time) override;
   void setupEllipticSolver() override;
 
-  void makeAdvection(double time, int tstep);
-  void makeExplicit(double time, int tstep);
+  void makeAdvection(double time, int tstep, int phase);
+  void makeExplicit(double time, int tstep, int phase);
 
   void solve(double time, int stage) override
   {
     solvePressure(time, stage);
-    solveVelocity(time, stage);
+    for (int i=0;i<this->Nphase;i++) {
+      solveVelocity(time, stage, i);
+    }
   };
 
   void makeForcing();
@@ -113,8 +115,10 @@ public:
   dlong fieldOffset = -1;
   dlong cubatureOffset = -1;
 
-  std::string velocityName;
-  occa::memory o_velocityName;
+  int Nphase = 1;
+
+  std::vector<std::string> velocityName; // TODO, phases
+  std::vector<occa::memory> o_velocityName;
 
   std::string pressureName;
   occa::memory o_pressureName;
@@ -122,18 +126,24 @@ public:
   std::function<occa::memory(double)> userImplicitLinearTerm = nullptr;
   std::function<occa::memory(double, int)> userAdvectionTerm = nullptr;
 
-  occa::memory o_U;
-  occa::memory o_Ue;
-  occa::memory o_div;
+  occa::memory o_U;   // mixture
+  occa::memory o_Ue;  // mixture
+  occa::memory o_div; // mixture
 
   occa::memory o_P;
   occa::memory o_Pe;
 
-  dfloat rho0 = NAN;
-  occa::memory o_rho;
-  occa::memory o_mue;
+  std::vector<occa::memory> o_U_phases;
+  std::vector<occa::memory> o_Ue_phases; // TODO
 
-  occa::memory o_relUrst;
+  dfloat rho0 = NAN;
+  occa::memory o_rho; // mixture
+  occa::memory o_mue; // mixture
+  std::vector<occa::memory> o_rho_phases;
+  std::vector<occa::memory> o_mue_phases;
+  std::vector<occa::memory> o_alpha_phases; // vol frac
+
+  occa::memory o_relUrst; // TODO no 2p
 
   void finalize() override
   {

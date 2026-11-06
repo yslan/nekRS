@@ -12,7 +12,7 @@
 
 #include <registerKernels.hpp>
 
-int nrs_t::numberActiveFields()
+int nrs_t::numberActiveFields() // Nek5000 won't have any 2phase part
 {
   int fields = 0;
   if (!platform->options.compareArgs("FLUID VELOCITY SOLVER", "NONE")) {
@@ -74,7 +74,7 @@ void nrs_t::printSolutionMinMax()
     }
   }
 
-  if (fluid) {
+  if (fluid) { // TODO 2phases
     auto mesh = fluid->mesh;
     auto o_ux = fluid->o_U + 0 * fluid->fieldOffset;
     auto o_uy = fluid->o_U + 1 * fluid->fieldOffset;
@@ -271,7 +271,7 @@ void nrs_t::init()
     fluid = [&]() {
       fluidSolverCfg_t cfg;
       cfg.name = "fluid";
-      cfg.velocityName = cfg.name + " velocity";
+      cfg.velocityName = {cfg.name + " velocity"};
       cfg.pressureName = cfg.name + " pressure";
       cfg.mesh = meshV;
       cfg.fieldOffset = fieldOffset;
