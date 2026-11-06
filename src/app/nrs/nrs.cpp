@@ -1281,6 +1281,40 @@ void nrs_t::writeCheckpoint(double t, bool enforceOutXYZ, bool enforceFP64, int 
   }
 
   checkpointWriter->process();
+
+  // p1<case>, p2<case>, ...: phase velocity only, no pressure (see note_2phases.md schema)
+  if (fluid && !fluid->o_U_phases.empty()) {
+    auto visMesh = meshT;
+
+    phaseCheckpointWriters.resize(fluid->o_U_phases.size());
+    for (size_t k = 0; k < fluid->o_U_phases.size(); k++) {
+      auto &writer = phaseCheckpointWriters[k];
+      if (!writer) {
+        writer = iofldFactory::create();
+      }
+
+      if (!writer->isInitialized()) {
+        const std::string prefix = "p" + std::to_string(k + 1); // 1-based: p1, p2
+        writer->open(visMesh, iofld::mode::write, prefix + platform->options.getArgs("CASENAME"));
+
+        if (platform->options.compareArgs(upperCase(fluid->velocityName[k]) + " CHECKPOINTING", "TRUE")) {
+          std::vector<occa::memory> o_V;
+          for (int i = 0; i < meshV->dim; i++) {
+            o_V.push_back(fluid->o_U_phases[k].slice(i * fluid->fieldOffset, visMesh->Nlocal));
+          }
+          writer->addVariable("velocity", o_V);
+          // deliberately no "pressure" variable -- phase checkpoints hold vel only
+        }
+      }
+
+      writer->writeAttribute("polynomialOrder", std::to_string(Nfld));
+      writer->writeAttribute("precision", (FP64) ? "64" : "32");
+      writer->writeAttribute("uniform", (uniform) ? "true" : "false");
+      writer->writeAttribute("outputMesh", (outXYZ) ? "true" : "false");
+      writer->addVariable("time", t);
+      writer->process();
+    }
+  }
 }
 
 int nrs_t::lastStepLocalSession(double timeNew, int tstep, double elapsedTime)

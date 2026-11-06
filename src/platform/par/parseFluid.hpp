@@ -87,6 +87,8 @@ void parsePhaseVelocitySection(const int rank,
   options.setArgs(optPrefix + "ELLIPTIC COEFF FIELD", "TRUE");
   options.setArgs(optPrefix + "NAME", upperCase(phaseName));
 
+  parseCheckpointing(rank, options, ini, parScope);
+
   parseInitialGuess(rank, options, ini, parScope);
 
   parsePreconditioner(rank, options, ini, parScope);
