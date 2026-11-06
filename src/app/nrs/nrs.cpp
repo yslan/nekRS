@@ -1780,6 +1780,12 @@ bool nrs_t::runInnerStep(std::function<bool(int)> convergenceCheck, int iter, bo
   }
 
   if (fluid) {
+    // refresh mixture o_rho/o_mue from current phase properties before applyDirichlet,
+    // since pressureDirichletBCHex3D/velocityDirichletBCHex3D consume them directly;
+    // updateMixtureProperties() is called again below (after userProperties) in case that
+    // hook updates phases' material properties for the elliptic solve itself.
+    fluid->updateMixtureProperties();
+
     fluid->applyDirichlet(timeNew);
     if (neknek && fieldsToSolveContains("fluid velocity")) {
       if (!platform->app->bc->hasOutflow("fluid velocity")) {
