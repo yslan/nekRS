@@ -175,6 +175,7 @@ constexpr double targetTimeBenchmark{0.5};
 constexpr int BLOCKSIZE = 256;
 constexpr int ALIGN_SIZE_BYTES = 256;
 constexpr int NSCALAR_MAX = 99;
+constexpr int NPHASES_MAX = 2;
 
 template <typename T> unsigned int alignStride(unsigned int stride)
 {
@@ -191,6 +192,14 @@ const std::string scalarDigitStr(int i)
   const int scalarWidth = std::to_string(NSCALAR_MAX - 1).length();
   std::stringstream ss;
   ss << std::setfill('0') << std::setw(scalarWidth) << i;
+  return ss.str();
+};
+
+const std::string phaseDigitStr(int i)
+{
+  const int phaseWidth = std::to_string(NPHASES_MAX - 1).length();
+  std::stringstream ss;
+  ss << std::setfill('0') << std::setw(phaseWidth) << i;
   return ss.str();
 };
 

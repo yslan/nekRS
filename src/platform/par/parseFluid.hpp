@@ -74,6 +74,80 @@ void parseVelocitySection(const int rank, setupAide &options, inipp::Ini *ini)
   parseRegularization(rank, options, ini, parScope);
 }
 
+// parses a single [FLUID PHASE <name>] section, following the same key template as
+// [FLUID VELOCITY] (parseVelocitySection above), scoped to that one phase's PHASEn options.
+void parsePhaseVelocitySection(const int rank,
+                                setupAide &options,
+                                inipp::Ini *ini,
+                                const std::string &parScope,
+                                const std::string &phaseName)
+{
+  const std::string optPrefix = upperCase(parPrefixFromParSection(parScope)); // e.g. "PHASE0 "
+
+  options.setArgs(optPrefix + "ELLIPTIC COEFF FIELD", "TRUE");
+  options.setArgs(optPrefix + "NAME", upperCase(phaseName));
+
+  parseInitialGuess(rank, options, ini, parScope);
+
+  parsePreconditioner(rank, options, ini, parScope);
+
+  parseLinearSolver(rank, options, ini, parScope);
+
+  parseSolverTolerance(rank, options, ini, parScope);
+
+  std::string v_bcMap;
+  if (ini->extract(parScope, "boundarytypemap", v_bcMap)) {
+    options.setArgs(optPrefix + "BOUNDARY TYPE MAP", v_bcMap);
+  }
+
+  double rho;
+  if (ini->extract(parScope, "density", rho) || ini->extract(parScope, "rho", rho)) {
+    options.setArgs(optPrefix + "DENSITY", to_string_f(rho));
+  }
+
+  std::string sbuf;
+  if (ini->extract(parScope, "viscosity", sbuf) || ini->extract(parScope, "mu", sbuf)) {
+    int err = 0;
+    double viscosity = parseFormula(sbuf.c_str(), &err);
+    if (err) {
+      append_error("Invalid expression for viscosity");
+    }
+    if (viscosity < 0) {
+      viscosity = fabs(1 / viscosity);
+    }
+    options.setArgs(optPrefix + "VISCOSITY", to_string_f(viscosity));
+  }
+
+  parseRegularization(rank, options, ini, parScope);
+}
+
+void parseFluidPhaseSections(const int rank, setupAide &options, inipp::Ini *ini)
+{
+  nphases = phaseMap.size();
+  options.setArgs("NUMBER OF PHASES", std::to_string(nphases));
+
+  if (nphases == 0) {
+    return;
+  }
+
+  for (auto const &sec : ini->sections) {
+    std::istringstream iss(sec.first);
+    std::string firstWord, secondWord, thirdWord;
+    iss >> firstWord >> secondWord >> thirdWord;
+
+    if (firstWord != "fluid" || secondWord != "phase") {
+      continue;
+    }
+
+    if (phaseMap.find(thirdWord) == phaseMap.end()) {
+      // already reported by validate(); skip here to avoid a second, confusing error
+      continue;
+    }
+
+    parsePhaseVelocitySection(rank, options, ini, sec.first, thirdWord);
+  }
+}
+
 void parseConstFlowRate(const int rank, setupAide &options, inipp::Ini *ini)
 {
   const std::vector<std::string> validValues = {

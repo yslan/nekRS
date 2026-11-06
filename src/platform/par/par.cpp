@@ -22,6 +22,9 @@ MPI_Comm comm;
 int nscal = 0;
 std::map<std::string, int> scalarMap;
 
+int nphases = 0;
+std::map<std::string, int> phaseMap;
+
 bool checkForTrue(const std::string &s)
 {
   return (s.find("true") != std::string::npos) || (s.find("yes") != std::string::npos) ||
@@ -64,6 +67,30 @@ std::optional<int> parseScalarIntegerFromString(const std::string &scalarString)
       return scalarMap.at(secondWord);
     } catch (std::invalid_argument &e) {
       std::cout << "Hit an invalid_argument error for scalarString=\"" << scalarString << "\". It said\n"
+                << e.what() << "\n";
+      nekrsAbort(MPI_COMM_SELF, EXIT_FAILURE, "%s\n", "");
+      return {};
+    }
+  } else {
+    nekrsAbort(MPI_COMM_SELF, EXIT_FAILURE, "%s\n", "");
+    return {};
+  }
+}
+
+std::optional<int> parsePhaseIntegerFromString(const std::string &phaseString)
+{
+  if (phaseString == std::string("fluid phase")) {
+    return {};
+  }
+
+  if (phaseString.length() > std::string("fluid phase").length()) {
+    try {
+      std::istringstream iss(phaseString);
+      std::string firstWord, secondWord, thirdWord;
+      iss >> firstWord >> secondWord >> thirdWord;
+      return phaseMap.at(thirdWord);
+    } catch (std::invalid_argument &e) {
+      std::cout << "Hit an invalid_argument error for phaseString=\"" << phaseString << "\". It said\n"
                 << e.what() << "\n";
       nekrsAbort(MPI_COMM_SELF, EXIT_FAILURE, "%s\n", "");
       return {};
@@ -183,6 +210,7 @@ static std::vector<std::string> velocityKeys = {
     {"rho"},
     {"viscosity"},
     {"mu"},
+    {"phases"},
 };
 
 static std::vector<std::string> scalarDefaultKeys = {
@@ -363,6 +391,9 @@ const std::vector<std::string> &getValidKeys(const std::string &section)
   if (section == "fluid velocity") {
     return velocityKeys;
   }
+  if (section.find("fluid phase") != std::string::npos) {
+    return velocityKeys;
+  }
   if (section == "cvode") {
     return cvodeKeys;
   } else {
@@ -415,6 +446,26 @@ void validate(inipp::Ini *ini, const std::vector<std::string> &userSections)
       }
     }
 
+    const auto isPhase = sec.first.find("fluid phase") != std::string::npos;
+
+    if (isPhase) {
+      std::istringstream iss(sec.first);
+      std::string firstWord, secondWord, thirdWord;
+      iss >> firstWord >> secondWord >> thirdWord;
+
+      if (firstWord != "fluid" || secondWord != "phase" || thirdWord.empty()) {
+        std::ostringstream error;
+        error << "invalid fluid phase section " << sec.first << "\n";
+        append_error(error.str());
+      }
+
+      if (phaseMap.find(thirdWord) == phaseMap.end()) {
+        std::ostringstream error;
+        error << "fluid phase section defined for unknown phase " << thirdWord << "\n";
+        append_error(error.str());
+      }
+    }
+
     const auto isElliptic = sec.first.find("elliptic") != std::string::npos;
     if (isElliptic) {
       std::istringstream iss(sec.first);
@@ -432,7 +483,7 @@ void validate(inipp::Ini *ini, const std::vector<std::string> &userSections)
 
     // check that section exists
     if (std::find(validSections.begin(), validSections.end(), sec.first) == validSections.end() &&
-        (!isScalar && !isBoomer && !isElliptic)) {
+        (!isScalar && !isBoomer && !isElliptic && !isPhase)) {
       std::ostringstream error;
       error << "Invalid section name: " << sec.first << std::endl;
       append_error(error.str());
@@ -462,6 +513,13 @@ void validate(inipp::Ini *ini, const std::vector<std::string> &userSections)
   if (scalarMap.size() >= NSCALAR_MAX) {
     std::ostringstream error;
     error << "specified " << scalarMap.size() << " scalars, while the maximum allowed is " << NSCALAR_MAX
+          << "\n";
+    append_error(error.str());
+  }
+
+  if (phaseMap.size() > NPHASES_MAX) {
+    std::ostringstream error;
+    error << "specified " << phaseMap.size() << " phases, while the maximum allowed is " << NPHASES_MAX
           << "\n";
     append_error(error.str());
   }
@@ -501,6 +559,10 @@ std::string parPrefixFromParSection(const std::string &parSection)
     }
     const auto is = parseScalarIntegerFromString(parSection);
     return "scalar" + scalarDigitStr(is.value()) + " ";
+  }
+  if (parSection.find("fluid phase") != std::string::npos) {
+    const auto ip = parsePhaseIntegerFromString(parSection);
+    return "phase" + phaseDigitStr(ip.value()) + " ";
   }
   return parSection + std::string(" ");
 }
@@ -565,6 +627,9 @@ void cleanupStaleKeys(const int rank, setupAide &options, inipp::Ini *ini)
   std::vector<std::string> sections = {"GEOM", "FLUID PRESSURE", "FLUID VELOCITY", "SCALAR DEFAULT"};
   for (int i = 0; i < nscal; i++) {
     sections.push_back("SCALAR" + scalarDigitStr(i));
+  }
+  for (int i = 0; i < nphases; i++) {
+    sections.push_back("PHASE" + phaseDigitStr(i));
   }
 
   auto cleanSection = [&](const std::string &section, const std::vector<std::string> &staleKeys) {
@@ -670,6 +735,15 @@ void Par::parse(setupAide &options)
     }
   }
 
+  if (ini->sections.count("fluid velocity")) { // 2p
+    std::string names;
+    ini->extract("fluid velocity", "phases", names);
+    auto list = serializeString(names, ',');
+    for (int i = 0; i < list.size(); i++) {
+      phaseMap[list[i]] = i;
+    }
+  }
+
   if (rank == 0) {
     validate(ini, userSections);
   }
@@ -709,6 +783,7 @@ void Par::parse(setupAide &options)
   if (ini->sections.count("fluid velocity")) {
     parsePressureSection(rank, options, ini);
     parseVelocitySection(rank, options, ini);
+    parseFluidPhaseSections(rank, options, ini);
     options.setArgs("FLUID", "TRUE");
   } else {
     options.setArgs("FLUID", "FALSE");
