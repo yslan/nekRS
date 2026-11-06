@@ -86,6 +86,11 @@ public:
   void applyDirichlet(double time) override;
   void setupEllipticSolver() override;
 
+  // mixture o_rho/o_mue from phase properties + volume fraction (eq 83/84 of
+  // two_phase_flow_equations_AT-1.pdf); no-op when no phases are declared. Must be called
+  // before solvePressure (hence before solve()) with up-to-date o_alpha_phases.
+  void updateMixtureProperties();
+
   void makeAdvection(double time, int tstep, int phase);
   void makeExplicit(double time, int tstep, int phase);
 

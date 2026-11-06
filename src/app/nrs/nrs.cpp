@@ -336,6 +336,12 @@ void nrs_t::init()
     double startTime;
     platform->options.getArgs("START TIME", startTime);
     evaluateProperties(startTime);
+
+    // mixture o_rho/o_mue from phase properties -- must happen before setupEllipticSolver
+    // below, which derives rho0 from o_rho.
+    if (fluid) {
+      fluid->updateMixtureProperties();
+    }
   }
 
   g0 = 1;
@@ -1807,6 +1813,10 @@ bool nrs_t::runInnerStep(std::function<bool(int)> convergenceCheck, int iter, bo
   }
 
   if (fluid) {
+    // userProperties (evaluateProperties above) may have updated phases' material
+    // properties; refresh the mixture o_rho/o_mue from them before solvePressure runs.
+    fluid->updateMixtureProperties();
+
     fluid->solve(timeNew, iter);
 
     if (platform->options.compareArgs("CONSTANT FLOW RATE", "TRUE")) {

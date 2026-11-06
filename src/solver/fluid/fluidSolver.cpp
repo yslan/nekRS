@@ -179,6 +179,39 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
   }
 }
 
+void fluidSolver_t::updateMixtureProperties()
+{
+  if (o_rho_phases.empty()) {
+    return; // classic (no phases declared) case: o_rho/o_mue stay as constructor-set
+  }
+
+  // rho_bar = (sum_k alpha_k / rho_k)^-1   (eq 83)
+  auto o_invRhoSum = platform->deviceMemoryPool.reserve<dfloat>(fieldOffset);
+  platform->linAlg->fill(mesh->Nlocal, 0.0, o_invRhoSum);
+  for (int k = 0; k < Nphase; k++) {
+    auto o_term = platform->deviceMemoryPool.reserve<dfloat>(fieldOffset);
+    platform->linAlg->axdyz(mesh->Nlocal, 1.0, o_alpha_phases[k], o_rho_phases[k], o_term);
+    platform->linAlg->axpby(mesh->Nlocal, 1.0, o_term, 1.0, o_invRhoSum);
+  }
+  platform->linAlg->ady(mesh->Nlocal, 1.0, o_invRhoSum); // in-place reciprocal -> rho_bar
+  o_rho.copyFrom(o_invRhoSum, mesh->Nlocal);
+
+  // nu_bar = sum_k alpha_k * (mue_k / rho_k)   (eq 84)
+  auto o_nuSum = platform->deviceMemoryPool.reserve<dfloat>(fieldOffset);
+  platform->linAlg->fill(mesh->Nlocal, 0.0, o_nuSum);
+  for (int k = 0; k < Nphase; k++) {
+    auto o_nuK = platform->deviceMemoryPool.reserve<dfloat>(fieldOffset);
+    platform->linAlg->axdyz(mesh->Nlocal, 1.0, o_mue_phases[k], o_rho_phases[k], o_nuK); // nu_k
+
+    auto o_term = platform->deviceMemoryPool.reserve<dfloat>(fieldOffset);
+    platform->linAlg->axmyz(mesh->Nlocal, 1.0, o_alpha_phases[k], o_nuK, o_term); // alpha_k*nu_k
+    platform->linAlg->axpby(mesh->Nlocal, 1.0, o_term, 1.0, o_nuSum);
+  }
+
+  // mue_bar = rho_bar * nu_bar
+  platform->linAlg->axmyz(mesh->Nlocal, 1.0, o_rho, o_nuSum, o_mue);
+}
+
 void fluidSolver_t::solvePressure(double time, int stage)
 {
   if (!ellipticSolverP) {
