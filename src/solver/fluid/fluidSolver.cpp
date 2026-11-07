@@ -10,11 +10,6 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
 {
   name = cfg.name;
 
-  if (platform->comm.mpiRank() == 0) {
-    std::cout << "================ "
-              << "SETUP " + upperCase(name) << " ================" << std::endl;
-  }
-
   mesh = cfg.mesh;
   fieldOffset = cfg.fieldOffset;
   fieldOffsetSum = mesh->dim * fieldOffset;
@@ -38,6 +33,16 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
     }
     return names;
   }() : cfg.velocityName;
+
+  if (platform->comm.mpiRank() == 0) {
+    std::cout << "================ "
+              << "SETUP " + upperCase(name) << " ================" << std::endl;
+    for (int i = 0; i < nPhasesDeclared; i++) {
+      std::cout << "================ "
+                << "SETUP " + upperCase(velocityName[i]) << " ================" << std::endl;
+      std::cout << "  inherit settings from " << mixtureVelocityName << std::endl;
+    }
+  }
 
   o_velocityName.resize(Nphase);
   for (int i = 0; i < Nphase; i++) {
@@ -665,15 +670,31 @@ void fluidSolver_t::solveVelocity(double time, int stage, int phase)
   // shared ellipticSolver set (built in setupEllipticSolver from mixture mue/rho for its
   // matrix structure/preconditioner); o_lambda0/o_lambda1 above are phase-specific, giving
   // phase_k's correct operator for the actual solve.
+  //
+  // Snapshot each component's convergence stats into velocityConvergence[phase] right after
+  // its own solve() call -- ellipticSolver is reused across phases, so its live Niter()/
+  // residual() state would otherwise be overwritten by the next phase before
+  // nrs_t::printStepInfo gets a chance to print it.
+  auto snapshot = [&](int component) {
+    auto &c = velocityConvergence[phase][component];
+    c.Niter = ellipticSolver.at(component)->Niter();
+    c.initialGuessResidual = ellipticSolver.at(component)->initialGuessResidual();
+    c.finalResidual = ellipticSolver.at(component)->finalResidual();
+  };
+
   if (ellipticSolver.at(0)->Nfields() > 1) {
     ellipticSolver.at(0)->solve(o_lambda0, o_lambda1, o_rhs, o_Uphase.slice(0, fieldOffsetSum));
+    snapshot(0);
   } else {
     const auto o_rhsX = o_rhs.slice(0 * fieldOffset, mesh->Nlocal);
     const auto o_rhsY = o_rhs.slice(1 * fieldOffset, mesh->Nlocal);
     const auto o_rhsZ = o_rhs.slice(2 * fieldOffset, mesh->Nlocal);
     ellipticSolver.at(0)->solve(o_lambda0, o_lambda1, o_rhsX, o_Uphase.slice(0 * fieldOffset, mesh->Nlocal));
+    snapshot(0);
     ellipticSolver.at(1)->solve(o_lambda0, o_lambda1, o_rhsY, o_Uphase.slice(1 * fieldOffset, mesh->Nlocal));
+    snapshot(1);
     ellipticSolver.at(2)->solve(o_lambda0, o_lambda1, o_rhsZ, o_Uphase.slice(2 * fieldOffset, mesh->Nlocal));
+    snapshot(2);
   }
 
   if (platform->verbose()) {
@@ -753,6 +774,18 @@ void fluidSolver_t::setupEllipticSolver()
     ellipticSolver.push_back(new elliptic(mixtureVelocityName, mesh, fieldOffset, EToBx, o_lambda0, o_lambda1));
     ellipticSolver.push_back(new elliptic(mixtureVelocityName, mesh, fieldOffset, EToBy, o_lambda0, o_lambda1));
     ellipticSolver.push_back(new elliptic(mixtureVelocityName, mesh, fieldOffset, EToBz, o_lambda0, o_lambda1));
+  }
+
+  velocityConvergence.assign(Nphase, std::vector<velocityConvergence_t>(ellipticSolver.size()));
+
+  if (Nphase > 1 && platform->comm.mpiRank() == 0) {
+    // one shared elliptic set was just built above (ELLIPTIC SETUP banner, named
+    // mixtureVelocityName) -- each phase REUSES it (phase-specific lambda0/lambda1 passed
+    // into .solve() per call, see solveVelocity), it is not rebuilt per phase from scratch.
+    for (int i = 0; i < Nphase; i++) {
+      std::cout << "  " << upperCase(velocityName[i]) << ": copy of " << upperCase(mixtureVelocityName)
+                << " elliptic setup (not rebuilt from scratch)" << std::endl;
+    }
   }
 
   {

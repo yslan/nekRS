@@ -13,6 +13,16 @@ public:
   dlong cubatureOffset;
 };
 
+// per-(phase, velocity component) snapshot of an elliptic solve's convergence stats, taken
+// right after that solve() call -- needed because ellipticSolver is a SHARED set reused
+// across phases (see setupEllipticSolver): its live Niter()/residual() state gets
+// overwritten by the next phase's solve before nrs_t::printStepInfo can read it.
+struct velocityConvergence_t {
+  int Niter = 0;
+  dfloat initialGuessResidual = 0;
+  dfloat finalResidual = 0;
+};
+
 class fluidSolver_t : public solver_t
 {
 private:
@@ -169,6 +179,10 @@ public:
   std::vector<occa::memory> o_rho_phases;
   std::vector<occa::memory> o_mue_phases;
   std::vector<occa::memory> o_alpha_phases; // vol frac
+
+  // [phase][component] -- component count matches ellipticSolver.size() (1 for block solver,
+  // 3 for separate x/y/z). Populated by solveVelocity(); read by nrs_t::printStepInfo.
+  std::vector<std::vector<velocityConvergence_t>> velocityConvergence;
 
   occa::memory o_relUrst; // TODO no 2p
 

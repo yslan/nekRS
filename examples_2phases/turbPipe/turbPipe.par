@@ -8,17 +8,17 @@ userSections = CASEDATA
 #verbose = true
 polynomialOrder = 7
 #startFrom = "restart.fld"
-stopAt = endTime
-endTime = 200
-
+#stopAt = endTime
+#endTime = 200
+numSteps = 1000
 timeStepper = tombo2
 
-#dt = 6.0e-3
-#advectionSubCyclingSteps = 2
-dt = targetCFL=4 + max=1e-2 + initial=6e-3
+dt = 6.0e-3
+advectionSubCyclingSteps = 2
+#dt = targetCFL=4 + max=1e-2 + initial=6e-3
 
-checkpointControl = simulationTime 
-checkpointInterval = 10
+#checkpointControl = simulationTime 
+checkpointInterval = 100
 
 regularization = hpfrt + nModes=1 + scalingCoeff=10
 
