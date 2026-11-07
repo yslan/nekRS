@@ -1735,10 +1735,12 @@ void nrs_t::initInnerStep(double time, dfloat _dt, int _tstep)
   if (fluid) {
     platform->timer.tic("makef");
 
-    if (platform->options.compareArgs("EQUATION TYPE", "NAVIERSTOKES")) {
-      fluid->makeAdvection(time, tstep);
+    for (int i = 0; i < fluid->Nphase; i++) {
+      if (platform->options.compareArgs("EQUATION TYPE", "NAVIERSTOKES")) {
+        fluid->makeAdvection(time, tstep, i);
+      }
+      fluid->makeExplicit(time, tstep, i);
     }
-    fluid->makeExplicit(time, tstep);
     fluid->makeForcing();
 
     platform->timer.toc("makef");

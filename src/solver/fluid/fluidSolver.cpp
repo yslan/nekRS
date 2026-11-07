@@ -25,7 +25,7 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
   // mixture-level velocity: option lookups below (SOLVER, BC, EXTRAPOLATION, ...) for the
   // mixture fields (o_U, o_Ue, o_EToB, ...) stay keyed on this name, independent of whether
   // phases are declared.
-  const std::string mixtureVelocityName = name + " velocity";
+  mixtureVelocityName = name + " velocity";
 
   int nPhasesDeclared = 0;
   platform->options.getArgs("NUMBER OF PHASES", nPhasesDeclared);
@@ -73,15 +73,28 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
 
   o_U_phases.resize(Nphase);
   o_Ue_phases.resize(Nphase);
-  for (int i = 0; i < Nphase; i++) {
-    o_U_phases[i] =
-        platform->device.malloc<dfloat>(fieldOffsetSum * std::max(o_coeffBDF.size(), o_coeffEXT.size()));
+  if (nPhasesDeclared > 0) {
+    for (int i = 0; i < Nphase; i++) {
+      o_U_phases[i] =
+          platform->device.malloc<dfloat>(fieldOffsetSum * std::max(o_coeffBDF.size(), o_coeffEXT.size()));
+      // zero default: nothing extrapolates into o_Ue_phases yet (TODO), and a case's UDF
+      // only sets the mixture o_U IC today, not o_U_phases -- avoid solving from garbage.
+      platform->linAlg->fill(o_U_phases[i].size(), 0.0, o_U_phases[i]);
 
-    if (!platform->options.compareArgs(upperCase(velocityName[i]) + " EXTRAPOLATION", "FALSE")) {
-      o_Ue_phases[i] = platform->device.malloc<dfloat>(fieldOffsetSum);
-    } else {
-      o_Ue_phases[i] = o_U_phases[i].slice(0, fieldOffsetSum);
+      if (!platform->options.compareArgs(upperCase(velocityName[i]) + " EXTRAPOLATION", "FALSE")) {
+        o_Ue_phases[i] = platform->device.malloc<dfloat>(fieldOffsetSum);
+        platform->linAlg->fill(o_Ue_phases[i].size(), 0.0, o_Ue_phases[i]);
+      } else {
+        o_Ue_phases[i] = o_U_phases[i].slice(0, fieldOffsetSum);
+      }
     }
+  } else {
+    // classic case: Nphase==1 and solveVelocity/applyDirichlet always write through
+    // o_U_phases[0]/o_Ue_phases[0] -- alias them to the real o_U/o_Ue (handle assignment,
+    // same underlying buffer) rather than allocating separate storage the rest of the
+    // solver (checkpoint, solvePressure's o_Ue-based terms, ...) would never see updated.
+    o_U_phases = {o_U};
+    o_Ue_phases = {o_Ue};
   }
 
   if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE")) {
@@ -144,6 +157,12 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
 
       o_alpha_phases[i] = platform->device.malloc<dfloat>(fieldOffset);
     }
+  } else {
+    // classic case: Nphase==1 and solveVelocity(phase=0) always indexes o_rho_phases[0]/
+    // o_mue_phases[0] -- alias them to the mixture fields so that indexing stays valid
+    // without solveVelocity needing to special-case "no phases declared".
+    o_rho_phases = {o_rho};
+    o_mue_phases = {o_mue};
   }
 
   if (!platform->options.compareArgs(upperCase(mixtureVelocityName) + " SOLVER", "NONE")) {
@@ -181,8 +200,9 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
 
 void fluidSolver_t::updateMixtureProperties()
 {
-  if (o_rho_phases.empty()) {
-    return; // classic (no phases declared) case: o_rho/o_mue stay as constructor-set
+  if (o_alpha_phases.empty()) {
+    return; // classic (no phases declared) case: o_rho_phases[0]/o_mue_phases[0] just alias
+            // the mixture fields (see constructor), nothing to recompute from.
   }
 
   // rho_bar = (sum_k alpha_k / rho_k)^-1   (eq 83)
@@ -253,6 +273,14 @@ void fluidSolver_t::solvePressure(double time, int stage)
     return o_del;
   }();
 
+  // TODO 2phase (eq 101, 2nd line): this lambda only builds the mixture term
+  // nu_bar*(2*grad(Q_bar) - curl(omega_bar)) from the mixture o_Ue/o_mue/o_div. It is MISSING
+  // the per-phase diffusion-velocity viscous term
+  //   -div( sum_k alpha_k * div( nu_k*(grad(Ubar_k) + grad(Ubar_k)^T) ) )
+  // (Ubar_k = u_k - u_bar, eq 86) entirely -- there is no code anywhere computing Ubar_k or
+  // this sum. Also missing: the phase-change/interfacial source term
+  // -div( sum_k [(u_ki-u_k)*Gamma_k/rho_k + M_k/rho_k] ) (eq 101 last line); currently assumed
+  // zero (no phase-change / no explicit interfacial exchange model exists).
   const auto o_stressTerm = [&]() {
     auto o_curl = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
 
@@ -290,6 +318,15 @@ void fluidSolver_t::solvePressure(double time, int stage)
     return o_stressTerm;
   }();
 
+  // TODO 2phase (eq 99/101): o_JwF (passed below) is built by makeForcing() from the MIXTURE
+  // o_U/o_ADV -- i.e. it currently contains gamma0/dt*u_bar - sum a_q*u_bar^(n-q)/dt PLUS a
+  // single advection term computed from the mixture velocity directly. Per eq 99 this is only
+  // correct for the BDF/EXT time-derivative part (u_bar is a genuine mixture quantity); the
+  // advection part must instead be sum_k alpha_k^(n+1) * sum_q b_q*(u_k . grad u_k)^(n-q), a
+  // PHASE-WEIGHTED SUM of each phase's own extrapolated advection -- NOT advection evaluated
+  // on u_bar (advection is nonlinear, so these are not equal). Needs per-phase o_ADV_phases[k]
+  // (see makeAdvection/makeForcing below) combined with alpha_k here, separately from the
+  // time-derivative term.
   auto o_rhs = [&]() {
     auto o_gradDiv = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
 
@@ -379,19 +416,34 @@ void fluidSolver_t::solvePressure(double time, int stage)
   platform->timer.toc(pressureName + "Solve");
 }
 
-void fluidSolver_t::solveVelocity(double time, int stage)
+// Solves phase `phase`'s own momentum equation (eq 97): rho_k/mue_k are phase-specific,
+// p/grad(p) is the SHARED mixture pressure (correct as-is, eq 97's -grad(p) term uses the
+// same p for every phase). o_div is still the mixture divergence (no per-phase divergence
+// field exists -- a remaining approximation, see note below) and the forcing o_JwF is still
+// mixture-level (advection/BDF not yet split per phase, see makeForcing/makeAdvection) --
+// both documented, bounded simplifications, not silently assumed correct.
+// ellipticSolver stays ONE shared set (see setupEllipticSolver); only lambda0/lambda1 passed
+// into .solve() below are phase-specific, which is enough to get phase_k's correct operator
+// (the shared set's own preconditioner is still built from mixture coefficients).
+void fluidSolver_t::solveVelocity(double time, int stage, int phase)
 {
   if (ellipticSolver.size() == 0) {
     return;
   }
 
-  platform->timer.tic(velocityName + "Solve");
+  auto &o_Uphase = o_U_phases[phase];
+  auto &o_rho_k = o_rho_phases[phase];
+  auto &o_mue_k = o_mue_phases[phase];
+
+  platform->timer.tic(velocityName[phase] + "Solve");
 
   const auto g0idt = *g0 / dt[0];
 
   double flopCount = 0.0;
-  platform->timer.tic(velocityName + " rhs");
+  platform->timer.tic(velocityName[phase] + " rhs");
 
+  // TODO 2phase (eq 97): o_div should be phase k's own divergence div(u_k); there is no
+  // per-phase divergence field, so the mixture o_div is used here as an approximation.
   const auto o_gradMueDiv = [&]() {
     dfloat scale = 1. / 3;
     if (platform->options.compareArgs(upperCase(name) + " STRESSFORMULATION", "TRUE")) {
@@ -399,7 +451,7 @@ void fluidSolver_t::solveVelocity(double time, int stage)
     }
 
     auto o_mueDiv = platform->deviceMemoryPool.reserve<dfloat>(fieldOffset);
-    platform->linAlg->axmyz(mesh->Nlocal, scale, o_mue, o_div, o_mueDiv);
+    platform->linAlg->axmyz(mesh->Nlocal, scale, o_mue_k, o_div, o_mueDiv);
 
     auto o_gradMueDiv = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
 
@@ -415,6 +467,9 @@ void fluidSolver_t::solveVelocity(double time, int stage)
     return o_gradMueDiv;
   }();
 
+  // TODO: RHO SPLITTING still uses the mixture rho0/o_rho (shared reference point) rather
+  // than a phase-specific rho0_k -- see note in [[02_momentum_pressure_phase_gaps]], not
+  // obviously the right generalization for very different phase densities.
   const auto o_rhoSplitTerm = [&]() {
     occa::memory o_del;
     if (platform->options.compareArgs(upperCase(pressureName) + " RHO SPLITTING", "TRUE")) {
@@ -432,8 +487,8 @@ void fluidSolver_t::solveVelocity(double time, int stage)
 
       flopCount += static_cast<double>(mesh->Nelements) * (6 * mesh->Np * mesh->Nq + 18 * mesh->Np);
 
-      // o_del * rho / rho0
-      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1 / rho0, o_rho, o_del);
+      // o_del * rho_k / rho0
+      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1 / rho0, o_rho_k, o_del);
     }
     return o_del;
   }();
@@ -470,22 +525,30 @@ void fluidSolver_t::solveVelocity(double time, int stage)
     return o_gradP;
   }();
 
+  // TODO (eq 97): o_JwF is still the mixture-level forcing (time-derivative + advection of
+  // the MIXTURE velocity, not phase k's own) -- see makeForcing/makeAdvection. Scaling it by
+  // o_rho_k here is a bounded approximation, not the real per-phase forcing. Also missing:
+  // the interfacial/phase-change exchange term (u_ki-u_k)*Gamma_k/alpha_k + M_k/alpha_k
+  // (eq 94/97) -- not modeled anywhere, assumed zero.
   const auto o_rhs = [&]() {
     auto o_rhs = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
 
-    // o_rho * o_JwF + o_gradP + o_gradMueDiv
+    // o_rho_k * o_JwF + o_gradP + o_gradMueDiv
     launchKernel("fluidSolver_t::velocityRhsHex3D",
                  mesh->Nlocal,
                  fieldOffset,
-                 o_rho,
+                 o_rho_k,
                  o_JwF,
                  o_gradMueDiv,
                  o_gradP,
                  o_rhs);
     flopCount += 9 * mesh->Nlocal;
 
+    // o_Uphase stands in for the extrapolated o_Ue_phases[phase], which nothing populates yet
+    // (TODO) -- using the current solution instead of an extrapolated guess here is safe
+    // (just a slightly less accurate linearization point for this Neumann BC term).
     launchKernel("fluidSolver_t::velocityNeumannBCHex3D",
-                 o_velocityName,
+                 o_velocityName[phase],
                  o_pressureName,
                  mesh->Nelements,
                  fieldOffset,
@@ -497,10 +560,10 @@ void fluidSolver_t::solveVelocity(double time, int stage)
                  mesh->o_x,
                  mesh->o_y,
                  mesh->o_z,
-                 o_rho,
-                 o_mue,
+                 o_rho_k,
+                 o_mue_k,
                  platform->app->bc->o_usrwrk,
-                 o_Ue,
+                 o_Uphase,
                  o_rhs);
     flopCount += static_cast<double>(mesh->Nelements) * (3 * mesh->Np + 36 * mesh->Nq * mesh->Nq);
 
@@ -511,35 +574,37 @@ void fluidSolver_t::solveVelocity(double time, int stage)
     return o_rhs;
   }();
 
-  platform->timer.toc(velocityName + " rhs");
-  platform->flopCounter->add(velocityName + " rhs", flopCount);
+  platform->timer.toc(velocityName[phase] + " rhs");
+  platform->flopCounter->add(velocityName[phase] + " rhs", flopCount);
 
-  const auto o_lambda0 = o_mue;
+  const auto o_lambda0 = o_mue_k;
   const auto o_lambda1 = [&]() {
     auto o_lambda1 = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
     if (userImplicitLinearTerm) {
       auto o_implicitLT = userImplicitLinearTerm(time);
-      platform->linAlg->axpbyz(mesh->Nlocal, g0idt, o_rho, 1.0, o_implicitLT, o_lambda1);
+      platform->linAlg->axpbyz(mesh->Nlocal, g0idt, o_rho_k, 1.0, o_implicitLT, o_lambda1);
     } else {
-      platform->linAlg->axpby(mesh->Nlocal, g0idt, o_rho, 0.0, o_lambda1);
+      platform->linAlg->axpby(mesh->Nlocal, g0idt, o_rho_k, 0.0, o_lambda1);
     }
     return o_lambda1;
   }();
 
-  if (platform->options.compareArgs(upperCase(velocityName) + " INITIAL GUESS", "EXTRAPOLATION") &&
-      stage == 1) {
-    o_U.copyFrom(o_Ue, fieldOffsetSum);
-  }
+  // TODO: no per-phase extrapolated initial guess yet (o_Ue_phases[phase] is unpopulated --
+  // see makeExplicit/extrapolateSolution TODOs), so the implicit solve always starts from the
+  // previous solution. Safe (slower convergence at worst), not a correctness issue.
 
+  // shared ellipticSolver set (built in setupEllipticSolver from mixture mue/rho for its
+  // matrix structure/preconditioner); o_lambda0/o_lambda1 above are phase-specific, giving
+  // phase_k's correct operator for the actual solve.
   if (ellipticSolver.at(0)->Nfields() > 1) {
-    ellipticSolver.at(0)->solve(o_lambda0, o_lambda1, o_rhs, o_U.slice(0, fieldOffsetSum));
+    ellipticSolver.at(0)->solve(o_lambda0, o_lambda1, o_rhs, o_Uphase.slice(0, fieldOffsetSum));
   } else {
     const auto o_rhsX = o_rhs.slice(0 * fieldOffset, mesh->Nlocal);
     const auto o_rhsY = o_rhs.slice(1 * fieldOffset, mesh->Nlocal);
     const auto o_rhsZ = o_rhs.slice(2 * fieldOffset, mesh->Nlocal);
-    ellipticSolver.at(0)->solve(o_lambda0, o_lambda1, o_rhsX, o_U.slice(0 * fieldOffset, mesh->Nlocal));
-    ellipticSolver.at(1)->solve(o_lambda0, o_lambda1, o_rhsY, o_U.slice(1 * fieldOffset, mesh->Nlocal));
-    ellipticSolver.at(2)->solve(o_lambda0, o_lambda1, o_rhsZ, o_U.slice(2 * fieldOffset, mesh->Nlocal));
+    ellipticSolver.at(0)->solve(o_lambda0, o_lambda1, o_rhsX, o_Uphase.slice(0 * fieldOffset, mesh->Nlocal));
+    ellipticSolver.at(1)->solve(o_lambda0, o_lambda1, o_rhsY, o_Uphase.slice(1 * fieldOffset, mesh->Nlocal));
+    ellipticSolver.at(2)->solve(o_lambda0, o_lambda1, o_rhsZ, o_Uphase.slice(2 * fieldOffset, mesh->Nlocal));
   }
 
   if (platform->verbose()) {
@@ -547,34 +612,43 @@ void fluidSolver_t::solveVelocity(double time, int stage)
                                                                  mesh->dim,
                                                                  fieldOffset,
                                                                  mesh->ogs->o_invDegree,
-                                                                 o_U,
+                                                                 o_Uphase,
                                                                  platform->comm.mpiComm());
     if (platform->comm.mpiRank() == 0) {
-      printf("U norm: %.15e\n", debugNorm);
+      printf("U norm (%s): %.15e\n", velocityName[phase].c_str(), debugNorm);
     }
   }
 
-  platform->timer.toc(velocityName + "Solve");
+  platform->timer.toc(velocityName[phase] + "Solve");
 }
 
+// Builds ONE shared ellipticSolver/ellipticSolverP set from mixture mue/rho/BC (fixed to
+// compile against mixtureVelocityName rather than the now-vectorized velocityName).
+// Deliberately NOT one set per phase (that would need real per-phase preconditioner setup,
+// a bigger change) -- solveVelocity() instead passes phase-specific lambda0/lambda1 into
+// this shared solver's .solve() per call, which IS correct for the operator itself; only the
+// preconditioner is still built from mixture coefficients (a known, bounded approximation).
 void fluidSolver_t::setupEllipticSolver()
 {
-  if (platform->options.compareArgs(upperCase(velocityName) + " SOLVER", "NONE")) {
+  if (platform->options.compareArgs(upperCase(mixtureVelocityName) + " SOLVER", "NONE")) {
     return;
   }
 
+  // builds ONE shared ellipticSolver set (matrix structure/preconditioner only) from the
+  // mixture mue/rho; solveVelocity() passes phase-specific lambda0/lambda1 into .solve()
+  // per call, same pattern solvePressure already uses for its own coefficients.
   auto o_lambda0 = o_mue;
   auto o_lambda1 = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
   platform->linAlg->axpby(mesh->Nlocal, *g0 / dt[0], o_rho, 0.0, o_lambda1);
 
-  const auto unalignedBoundary = platform->app->bc->hasUnalignedMixed(velocityName);
+  const auto unalignedBoundary = platform->app->bc->hasUnalignedMixed(mixtureVelocityName);
 
-  if (platform->options.compareArgs(upperCase(velocityName) + " SOLVER", "BLOCK")) {
+  if (platform->options.compareArgs(upperCase(mixtureVelocityName) + " SOLVER", "BLOCK")) {
     if (platform->options.compareArgs(upperCase(name) + " STRESSFORMULATION", "TRUE")) {
-      platform->options.setArgs(upperCase(velocityName) + " STRESSFORMULATION", "TRUE");
+      platform->options.setArgs(upperCase(mixtureVelocityName) + " STRESSFORMULATION", "TRUE");
     }
 
-    ellipticSolver.push_back(new elliptic(velocityName, mesh, fieldOffset, o_lambda0, o_lambda1));
+    ellipticSolver.push_back(new elliptic(mixtureVelocityName, mesh, fieldOffset, o_lambda0, o_lambda1));
 
     if (unalignedBoundary) {
       o_zeroNormalMask = mesh->createZeroNormalMask(fieldOffset, ellipticSolver[0]->o_EToB());
@@ -597,19 +671,19 @@ void fluidSolver_t::setupEllipticSolver()
                platform->comm.mpiComm(),
                EXIT_FAILURE,
                "unaligned mixed boundary conditions require using block solver for %s\n",
-               velocityName.c_str());
+               mixtureVelocityName.c_str());
     auto EToBx = mesh->createEToB(
-        [&](int bID) -> int { return platform->app->bc->typeElliptic(bID, velocityName, "x"); });
+        [&](int bID) -> int { return platform->app->bc->typeElliptic(bID, mixtureVelocityName, "x"); });
 
     auto EToBy = mesh->createEToB(
-        [&](int bID) -> int { return platform->app->bc->typeElliptic(bID, velocityName, "y"); });
+        [&](int bID) -> int { return platform->app->bc->typeElliptic(bID, mixtureVelocityName, "y"); });
 
     auto EToBz = mesh->createEToB(
-        [&](int bID) -> int { return platform->app->bc->typeElliptic(bID, velocityName, "z"); });
+        [&](int bID) -> int { return platform->app->bc->typeElliptic(bID, mixtureVelocityName, "z"); });
 
-    ellipticSolver.push_back(new elliptic(velocityName, mesh, fieldOffset, EToBx, o_lambda0, o_lambda1));
-    ellipticSolver.push_back(new elliptic(velocityName, mesh, fieldOffset, EToBy, o_lambda0, o_lambda1));
-    ellipticSolver.push_back(new elliptic(velocityName, mesh, fieldOffset, EToBz, o_lambda0, o_lambda1));
+    ellipticSolver.push_back(new elliptic(mixtureVelocityName, mesh, fieldOffset, EToBx, o_lambda0, o_lambda1));
+    ellipticSolver.push_back(new elliptic(mixtureVelocityName, mesh, fieldOffset, EToBy, o_lambda0, o_lambda1));
+    ellipticSolver.push_back(new elliptic(mixtureVelocityName, mesh, fieldOffset, EToBz, o_lambda0, o_lambda1));
   }
 
   {
@@ -626,7 +700,7 @@ void fluidSolver_t::setupEllipticSolver()
 
     // derive from velocity
     auto EToBP = mesh->createEToB([&](int bID) -> int {
-      auto bcType = platform->app->bc->typeId(bID, velocityName);
+      auto bcType = platform->app->bc->typeId(bID, mixtureVelocityName);
       if (bID < 1) {
         return ellipticBcType::NO_OP;
       }
@@ -637,13 +711,16 @@ void fluidSolver_t::setupEllipticSolver()
   }
 }
 
+// Per-phase velocity BC loop (pressure BC redundantly recomputed each phase -- idempotent,
+// deterministic, harmless at Nphase<=2). Zero-normal-mask stays mixture-level (shared BC
+// topology, same mesh/EToB for every phase).
 void fluidSolver_t::applyDirichlet(double time)
 {
   if (ellipticSolver.size() == 0) {
     return;
   }
 
-  if (platform->app->bc->hasUnalignedMixed(velocityName)) {
+  if (platform->app->bc->hasUnalignedMixed(mixtureVelocityName)) {
     launchKernel("mesh-applyZeroNormalMask",
                  mesh->Nelements,
                  fieldOffset,
@@ -666,88 +743,96 @@ void fluidSolver_t::applyDirichlet(double time)
 
   // lower than any other possible Dirichlet value
   static constexpr dfloat TINY = -1e30;
-  occa::memory o_tmp = platform->deviceMemoryPool.reserve<dfloat>((mesh->dim + 1) * fieldOffset);
-  platform->linAlg->fill(o_tmp.size(), TINY, o_tmp);
-
   auto &neknek = platform->app->neknek;
 
-  for (int sweep = 0; sweep < 2; sweep++) {
-    launchKernel("fluidSolver_t::pressureDirichletBCHex3D",
-                 o_pressureName,
-                 mesh->Nelements,
-                 time,
-                 fieldOffset,
-                 mesh->o_sgeo,
-                 mesh->o_x,
-                 mesh->o_y,
-                 mesh->o_z,
-                 mesh->o_vmapM,
-                 mesh->o_EToB,
-                 o_EToB,
-                 o_rho,
-                 o_mue,
-                 platform->app->bc->o_usrwrk,
-                 o_Ue,
-                 o_tmp);
+  for (int phase = 0; phase < Nphase; phase++) {
+    occa::memory o_tmp = platform->deviceMemoryPool.reserve<dfloat>((mesh->dim + 1) * fieldOffset);
+    platform->linAlg->fill(o_tmp.size(), TINY, o_tmp);
 
-    launchKernel("fluidSolver_t::velocityDirichletBCHex3D",
-                 o_velocityName,
-                 mesh->Nelements,
-                 fieldOffset,
-                 time,
-                 mesh->o_sgeo,
-                 mesh->o_x,
-                 mesh->o_y,
-                 mesh->o_z,
-                 mesh->o_vmapM,
-                 mesh->o_EToB,
-                 o_EToB,
-                 o_rho,
-                 o_mue,
-                 neknek ? neknek->intValOffset() : 0,
-                 neknek ? neknek->o_pointMap() : o_NULL,
-                 neknek ? neknek->getField(velocityName).o_intVal : o_NULL,
-                 platform->app->bc->o_usrwrk,
-                 o_U,
-                 o_tmp.slice(fieldOffset));
+    for (int sweep = 0; sweep < 2; sweep++) {
+      launchKernel("fluidSolver_t::pressureDirichletBCHex3D",
+                   o_pressureName,
+                   mesh->Nelements,
+                   time,
+                   fieldOffset,
+                   mesh->o_sgeo,
+                   mesh->o_x,
+                   mesh->o_y,
+                   mesh->o_z,
+                   mesh->o_vmapM,
+                   mesh->o_EToB,
+                   o_EToB,
+                   o_rho,
+                   o_mue,
+                   platform->app->bc->o_usrwrk,
+                   o_Ue,
+                   o_tmp);
 
-    oogs::startFinish(o_tmp,
-                      1 + mesh->dim,
-                      fieldOffset,
-                      ogsDfloat,
-                      (sweep == 0) ? ogsMax : ogsMin,
-                      mesh->oogs3);
-  }
+      launchKernel("fluidSolver_t::velocityDirichletBCHex3D",
+                   o_velocityName[phase],
+                   mesh->Nelements,
+                   fieldOffset,
+                   time,
+                   mesh->o_sgeo,
+                   mesh->o_x,
+                   mesh->o_y,
+                   mesh->o_z,
+                   mesh->o_vmapM,
+                   mesh->o_EToB,
+                   o_EToB,
+                   o_rho_phases[phase],
+                   o_mue_phases[phase],
+                   neknek ? neknek->intValOffset() : 0,
+                   neknek ? neknek->o_pointMap() : o_NULL,
+                   neknek ? neknek->getField(velocityName[phase]).o_intVal : o_NULL,
+                   platform->app->bc->o_usrwrk,
+                   o_U_phases[phase],
+                   o_tmp.slice(fieldOffset));
 
-  if (ellipticSolverP->Nmasked()) {
-    auto o_dirichletValues = o_tmp.slice(0, fieldOffset);
-    launchKernel("core-maskCopy",
-                 ellipticSolverP->Nmasked(),
-                 0,
-                 0,
-                 ellipticSolverP->o_maskIds(),
-                 o_dirichletValues,
-                 o_P);
-  }
-
-  int cnt = 0;
-  for (auto &solver : ellipticSolver) {
-    if (solver->Nmasked()) {
-      const auto offset = cnt * fieldOffset;
-      auto o_dirichletValues = o_tmp.slice(fieldOffset, fieldOffsetSum);
-      launchKernel("core-maskCopy2",
-                   solver->Nmasked(),
-                   offset,
-                   offset,
-                   solver->o_maskIds(),
-                   o_dirichletValues,
-                   o_U,
-                   o_Ue);
+      oogs::startFinish(o_tmp,
+                        1 + mesh->dim,
+                        fieldOffset,
+                        ogsDfloat,
+                        (sweep == 0) ? ogsMax : ogsMin,
+                        mesh->oogs3);
     }
-    cnt++;
+
+    if (phase == 0 && ellipticSolverP->Nmasked()) {
+      // pressure is shared -- apply its Dirichlet values into o_P only once
+      auto o_dirichletValues = o_tmp.slice(0, fieldOffset);
+      launchKernel("core-maskCopy",
+                   ellipticSolverP->Nmasked(),
+                   0,
+                   0,
+                   ellipticSolverP->o_maskIds(),
+                   o_dirichletValues,
+                   o_P);
+    }
+
+    int cnt = 0;
+    for (auto &solver : ellipticSolver) {
+      if (solver->Nmasked()) {
+        const auto offset = cnt * fieldOffset;
+        auto o_dirichletValues = o_tmp.slice(fieldOffset, fieldOffsetSum);
+        launchKernel("core-maskCopy2",
+                     solver->Nmasked(),
+                     offset,
+                     offset,
+                     solver->o_maskIds(),
+                     o_dirichletValues,
+                     o_U_phases[phase],
+                     o_Ue_phases[phase]);
+      }
+      cnt++;
+    }
   }
 }
 
+// TODO 2phase (eq 92/97 vs eq 99): combines BDF+advection+rho into one mixture o_JwF from
+// mixture o_U/o_ADV. Needs to produce TWO different things instead: (a) per-phase
+// o_JwF_phases[k] built from o_rho_phases[k]/o_U_phases[k]/o_ADV_phases[k] for solveVelocity's
+// RHS, and (b) an alpha_k-weighted sum of just the phase advection terms for solvePressure's
+// RHS (eq 99) -- these must not be the same quantity.
 void fluidSolver_t::makeForcing()
 {
   if (ellipticSolver.size() == 0) {
@@ -770,7 +855,7 @@ void fluidSolver_t::makeForcing()
                o_JwF);
 
   dfloat flops = Nsubsteps ? (6 + 6 * o_coeffEXT.size()) : (6 * o_coeffEXT.size() + 12 * o_coeffBDF.size());
-  platform->flopCounter->add(velocityName + " sumMakef", flops * static_cast<double>(mesh->Nlocal));
+  platform->flopCounter->add(mixtureVelocityName + " sumMakef", flops * static_cast<double>(mesh->Nlocal));
 
   if (platform->verbose()) {
     const dfloat debugNorm = platform->linAlg->weightedNorm2Many(mesh->Nlocal,
@@ -792,15 +877,22 @@ void fluidSolver_t::makeForcing()
   }
 }
 
-void fluidSolver_t::makeAdvection(double time, int tstep)
+// TODO (eq 92/99): advection is still evaluated once on the mixture o_U into a single o_ADV
+// (not per phase, not alpha_k-weighted -- see makeForcing TODO), so only phase 0's call does
+// anything; other phases' calls (from the per-phase loop in nrs.cpp) are a deliberate no-op.
+void fluidSolver_t::makeAdvection(double time, int tstep, int phase)
 {
+  if (phase != 0) {
+    return;
+  }
+
   if (userAdvectionTerm) {
     userAdvectionTerm(time, tstep);
     return;
   }
 
   if (Nsubsteps) {
-    advectionSubcycling(std::min(tstep, static_cast<int>(o_coeffEXT.size())), time);
+    advectionSubcycling(std::min(tstep, static_cast<int>(o_coeffEXT.size())), time, phase);
   } else {
     auto &o_Uconv = o_relUrst;
 
@@ -840,30 +932,37 @@ void fluidSolver_t::makeAdvection(double time, int tstep)
 
     flopCount *= mesh->Nelements;
     flopCount *= mesh->dim;
-    platform->flopCounter->add(velocityName + " advection", flopCount);
+    platform->flopCounter->add(mixtureVelocityName + " advection", flopCount);
   }
 }
 
-void fluidSolver_t::makeExplicit(double time, int tstep)
+// TODO: regularization/mesh-advection still operate on the mixture o_U/o_EXT only (not
+// per-phase PHASEk REGULARIZATION options yet -- see makeAdvection/makeForcing); only
+// phase 0's call does anything, matching makeAdvection's pattern.
+void fluidSolver_t::makeExplicit(double time, int tstep, int phase)
 {
+  if (phase != 0) {
+    return;
+  }
+
   if (ellipticSolver.size() == 0) {
     return;
   }
 
-  if (platform->options.compareArgs(upperCase(velocityName) + " REGULARIZATION METHOD", "HPFRT")) {
+  if (platform->options.compareArgs(upperCase(mixtureVelocityName) + " REGULARIZATION METHOD", "HPFRT")) {
     dfloat strength = NAN;
-    platform->options.getArgs(upperCase(velocityName) + " HPFRT STRENGTH", strength);
+    platform->options.getArgs(upperCase(mixtureVelocityName) + " HPFRT STRENGTH", strength);
 
     launchKernel("core-vectorFilterRTHex3D", mesh->Nelements, o_filterRT, strength, fieldOffset, o_U, o_EXT);
 
     double flops = 24 * mesh->Np * mesh->Nq + 3 * mesh->Np;
     flops *= static_cast<double>(mesh->Nelements);
-    platform->flopCounter->add(velocityName + " filterRT", flops);
+    platform->flopCounter->add(mixtureVelocityName + " filterRT", flops);
   }
 
-  if (platform->options.compareArgs(upperCase(velocityName) + " REGULARIZATION METHOD", "GJP")) {
+  if (platform->options.compareArgs(upperCase(mixtureVelocityName) + " REGULARIZATION METHOD", "GJP")) {
     dfloat tauFactor;
-    platform->options.getArgs(upperCase(velocityName) + " REGULARIZATION GJP SCALING COEFF", tauFactor);
+    platform->options.getArgs(upperCase(mixtureVelocityName) + " REGULARIZATION GJP SCALING COEFF", tauFactor);
 
     for (int i = 0; i < mesh->dim; i++) {
       auto o_EXTi = o_EXT.slice(i * fieldOffset, mesh->Nlocal);
@@ -883,7 +982,7 @@ void fluidSolver_t::makeExplicit(double time, int tstep)
                  o_EXT);
     double flops = 54 * mesh->Np * mesh->Nq + 63 * mesh->Np;
     flops *= static_cast<double>(mesh->Nelements);
-    platform->flopCounter->add(velocityName + " advectMeshVelocity", flops);
+    platform->flopCounter->add(mixtureVelocityName + " advectMeshVelocity", flops);
   }
 }
 
@@ -913,9 +1012,12 @@ void fluidSolver_t::restoreSolutionState()
   o_relUrst.copyFrom(o_relUrst0);
 }
 
+// Mixture-only (classic case: o_U_phases[0]/o_Ue_phases[0] alias o_U/o_Ue, so this covers it
+// for free; 2-phase case still needs its own per-phase extrapolation loop -- TODO, currently
+// unused anyway since solveVelocity doesn't consume o_Ue_phases[phase] yet).
 void fluidSolver_t::extrapolateSolution()
 {
-  if (!platform->options.compareArgs(upperCase(velocityName) + " EXTRAPOLATION", "FALSE")) {
+  if (!platform->options.compareArgs(upperCase(mixtureVelocityName) + " EXTRAPOLATION", "FALSE")) {
     launchKernel("core-extrapolate",
                  mesh->Nlocal,
                  mesh->dim,
@@ -938,6 +1040,9 @@ void fluidSolver_t::extrapolateSolution()
   }
 }
 
+// TODO 2phase: only lags the mixture o_U history; each phase's o_U_phases[k] needs its own
+// BDF/EXT lag history the same way (same gap in saveSolutionState/restoreSolutionState, which
+// only snapshot mixture o_U/o_prop too).
 void fluidSolver_t::lagSolution()
 {
   {
@@ -955,7 +1060,9 @@ void fluidSolver_t::lagSolution()
   }
 }
 
-void fluidSolver_t::advectionSubcycling(int nEXT, double time)
+// TODO: subcycles the mixture o_U only, same eq 92/99 concern as makeAdvection -- only ever
+// called with phase==0 (makeAdvection already early-returns otherwise).
+void fluidSolver_t::advectionSubcycling(int nEXT, double time, int phase)
 {
   const auto nFields = mesh->dim;
   const auto fieldOffsetSum = nFields * fieldOffset;

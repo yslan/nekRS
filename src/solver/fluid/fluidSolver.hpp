@@ -122,6 +122,11 @@ public:
 
   int Nphase = 1;
 
+  // name of the shared/mixture-level velocity solve (e.g. "fluid velocity"), used for option
+  // lookups and BC/solver setup that still operate on the single shared ellipticSolver set,
+  // as opposed to velocityName[k] (per-phase). Set once in the constructor.
+  std::string mixtureVelocityName;
+
   std::vector<std::string> velocityName; // TODO, phases
   std::vector<occa::memory> o_velocityName;
 

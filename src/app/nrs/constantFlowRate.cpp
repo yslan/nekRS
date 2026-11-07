@@ -101,7 +101,7 @@ void nrs_t::computeHomogenousStokesSolution(double time)
   o_lambda0.free();
 
   auto o_RhsVel = [&]() {
-    platform->timer.tic(fluid->velocityName + " rhs");
+    platform->timer.tic(fluid->velocityName[0] + " rhs");
 
     occa::memory o_rhs = platform->deviceMemoryPool.reserve<dfloat>(mesh->dim * fieldOffset);
 
@@ -129,11 +129,11 @@ void nrs_t::computeHomogenousStokesSolution(double time)
       const dfloat n_dim = flowDirection[dim];
       platform->linAlg->axpby(mesh->Nlocal, n_dim, o_JwF, 1.0, o_rhs, offset, offset);
     }
-    platform->timer.toc(fluid->velocityName + " rhs");
+    platform->timer.toc(fluid->velocityName[0] + " rhs");
     return o_rhs;
   }();
 
-  platform->timer.tic(fluid->velocityName + "Solve");
+  platform->timer.tic(fluid->velocityName[0] + "Solve");
 
   o_lambda0 = fluid->o_mue;
   auto o_lambda1 = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
@@ -149,7 +149,7 @@ void nrs_t::computeHomogenousStokesSolution(double time)
     fluid->ellipticSolver[1]->solve(o_lambda0, o_lambda1, o_RhsVel.slice(1 * fieldOffset), o_Ucy);
     fluid->ellipticSolver[2]->solve(o_lambda0, o_lambda1, o_RhsVel.slice(2 * fieldOffset), o_Ucz);
   }
-  platform->timer.toc(fluid->velocityName + "Solve");
+  platform->timer.toc(fluid->velocityName[0] + "Solve");
 
   platform->flopCounter->add("ConstantFlowRate::compute", flops);
 }
@@ -265,6 +265,13 @@ void nrs_t::flowRatePrintInfo(int tstep, bool verboseInfo)
   }
 }
 
+// TODO 2phase: NOT phase-aware. Solves its correction with the shared ellipticSolver +
+// mixture o_mue/o_rho, and applies the rescale directly to fluid->o_U (below, via
+// axpbyMany(..., o_Uc, 1.0, fluid->o_U)). In the classic case o_U_phases[0] aliases o_U, so
+// this reaches the real solved field; in the 2-phase case o_U is a separate, unused buffer
+// (solveVelocity solves into o_U_phases[k]), so CONSTANT FLOW RATE = TRUE would silently do
+// nothing to the actual phase velocities. Not fixed -- flagging so it isn't trusted on a
+// 2-phase case until it is.
 void nrs_t::adjustFlowRate(int tstep, double time)
 {
   flops = 0.0;
