@@ -26,6 +26,17 @@ void parseScalarSections(const int rank, setupAide &options, inipp::Ini *ini)
       }
     }
 
+    // marks this scalar as the volume-fraction transport variable for a 2-phase PHASEk
+    // (Plan G: alpha transport via the scalar solver, manually copied into
+    // fluid->o_alpha_phases[k] by the UDF via setAlphaPhase()). Purely descriptive --
+    // nothing in the parser cross-checks this against the declared phases list.
+    {
+      std::string phaseAssoc;
+      if (ini->extract(sec.first, "phase", phaseAssoc)) {
+        options.setArgs("SCALAR" + sid + " ALPHA PHASE", upperCase(phaseAssoc));
+      }
+    }
+
     const auto parScope = sec.first;
     parseCheckpointing(rank, options, ini, parScope);
     parseRegularization(rank, options, ini, parScope);

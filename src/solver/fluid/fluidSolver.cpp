@@ -220,6 +220,30 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
   }
 }
 
+// Plan G: not called anywhere in this codebase automatically -- the UDF drives this (e.g.
+// from preFluid, right after scalar->solve() has updated the independent alpha scalar(s),
+// before fluid->solve() consumes o_alpha_phases). No [0,1] clipping yet -- no elementwise
+// clamp primitive exists in linAlg currently; add one if sharp alpha fronts overshoot.
+void fluidSolver_t::setAlphaPhase(int phase, const occa::memory &o_alpha)
+{
+  o_alpha_phases[phase].copyFrom(o_alpha, mesh->Nlocal);
+}
+
+// o_alpha_phases[phase] = 1 - sum_{k != phase} o_alpha_phases[k]. General for any Nphase:
+// summing N independently-discretized alpha transport equations does not exactly preserve
+// sum_k alpha_k = 1 under discretization error; deriving one phase by subtraction makes it
+// an algebraic identity instead of something that has to emerge numerically.
+void fluidSolver_t::deriveLastAlphaPhase(int phase)
+{
+  platform->linAlg->fill(mesh->Nlocal, 1.0, o_alpha_phases[phase]);
+  for (int k = 0; k < Nphase; k++) {
+    if (k == phase) {
+      continue;
+    }
+    platform->linAlg->axpby(mesh->Nlocal, -1.0, o_alpha_phases[k], 1.0, o_alpha_phases[phase]);
+  }
+}
+
 void fluidSolver_t::updateMixtureProperties()
 {
   if (o_alpha_phases.empty()) {
@@ -722,6 +746,41 @@ void fluidSolver_t::setupEllipticSolver()
 {
   if (platform->options.compareArgs(upperCase(mixtureVelocityName) + " SOLVER", "NONE")) {
     return;
+  }
+
+  if (Nphase > 1) {
+    // Restriction: the shared ellipticSolver's preconditioner is only confirmed to rebuild
+    // correctly from phase-specific lambda0/lambda1 for PRECONDITIONER=JACOBI
+    // (ellipticUpdateAllJacobi runs inside elliptic::_solve on every call). MULTIGRID/AMG
+    // coarse-grid setup has not been verified to do the same -- refuse rather than silently
+    // reuse a preconditioner that may be frozen at the mixture's coefficients.
+    for (int i = 0; i < Nphase; i++) {
+      nekrsCheck(!platform->options.compareArgs(upperCase(velocityName[i]) + " PRECONDITIONER", "JACOBI"),
+                 platform->comm.mpiComm(),
+                 EXIT_FAILURE,
+                 "2-phase: %s shares one elliptic solver across phases, currently only "
+                 "verified correct for PRECONDITIONER=JACOBI -- got %s PRECONDITIONER=%s\n",
+                 velocityName[i].c_str(),
+                 velocityName[i].c_str(),
+                 platform->options.getArgs(upperCase(velocityName[i]) + " PRECONDITIONER").c_str());
+    }
+
+    // Restriction: o_EToB (BC application) and each elliptic object's own EToB (operator/
+    // mask structure) are built ONCE from mixtureVelocityName's boundaryTypeMap only (see
+    // o_EToB construction above and the EToBx/y/z lambdas below) -- a per-phase
+    // boundaryTypeMap override would currently be silently ignored, not actually produce
+    // mixed BC. Refuse rather than let a case believe per-phase BC is in effect: there isn't
+    // enough math support for mixed BC yet (Plan C left the option open, not implemented).
+    const auto mixtureBcMap = platform->options.getArgs(upperCase(mixtureVelocityName) + " BOUNDARY TYPE MAP");
+    for (int i = 0; i < Nphase; i++) {
+      const auto phaseBcMap = platform->options.getArgs(upperCase(velocityName[i]) + " BOUNDARY TYPE MAP");
+      nekrsCheck(phaseBcMap != mixtureBcMap,
+                 platform->comm.mpiComm(),
+                 EXIT_FAILURE,
+                 "2-phase: %s boundaryTypeMap differs from the mixture's -- mixed BC per "
+                 "phase is not supported yet (shared o_EToB/elliptic EToB)\n",
+                 velocityName[i].c_str());
+    }
   }
 
   // builds ONE shared ellipticSolver set (matrix structure/preconditioner only) from the

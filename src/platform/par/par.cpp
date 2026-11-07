@@ -233,6 +233,7 @@ static std::vector<std::string> scalarKeys = {
     {"conductivitySolid"},
     {"absolutetol"},
     {"mesh"},
+    {"phase"}, // marks this scalar as the volume-fraction transport variable for a 2-phase PHASEk (see note_2phases.md / Plan G)
 };
 
 static std::vector<std::string> cvodeKeys = {

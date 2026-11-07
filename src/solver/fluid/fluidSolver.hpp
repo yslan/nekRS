@@ -49,10 +49,30 @@ private:
 public:
   fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<geomSolver_t> &geom);
 
+  // key resolution shared by o_solution/o_explicitTerms/o_transportCoeff/o_diffusionCoeff:
+  // "" or "mixture" -> the mixture field; velocityName[i] (e.g. "phase0", or "fluid
+  // velocity" in the classic case) -> phase i's own field. Returns -1 for no phase match
+  // (caller falls through to its own x/y/z/p handling). Note the differing "shape" by key
+  // kind: a phase key returns the FULL vector field (like the mixture/empty-key case), not
+  // a single-component slice the way "x"/"y"/"z" do.
+  int phaseKeyIndex(const std::string &key) const
+  {
+    for (int i = 0; i < Nphase; i++) {
+      if (lowerCase(key) == lowerCase(velocityName[i])) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   deviceMemory<dfloat> o_solution(std::string key = "") override
   {
-    if (key.empty()) {
+    if (key.empty() || lowerCase(key) == "mixture") {
       return deviceMemory<dfloat>(o_U);
+    }
+
+    if (const auto i = phaseKeyIndex(key); i >= 0) {
+      return deviceMemory<dfloat>(o_U_phases[i]);
     }
 
     if (lowerCase(key) == "p" || lowerCase(key) == "pressure") {
@@ -67,9 +87,14 @@ public:
 
   deviceMemory<dfloat> o_explicitTerms(std::string key = "") override
   {
-    if (key.empty()) {
+    if (key.empty() || lowerCase(key) == "mixture") {
       return deviceMemory<dfloat>(o_EXT);
     }
+
+    if (const auto i = phaseKeyIndex(key); i >= 0) {
+      return deviceMemory<dfloat>(o_EXT_phases[i]);
+    }
+
     auto it = nameToIndex.find(lowerCase(key));
     const auto idx = (it != nameToIndex.end()) ? it->second : -1;
     return (idx >= 0) ? deviceMemory<dfloat>(o_EXT.slice(idx * fieldOffset, fieldOffset))
@@ -78,11 +103,17 @@ public:
 
   deviceMemory<dfloat> o_diffusionCoeff(std::string key = "") override
   {
+    if (const auto i = phaseKeyIndex(key); i >= 0) {
+      return deviceMemory<dfloat>(o_mue_phases[i]);
+    }
     return deviceMemory<dfloat>(o_mue);
   };
 
   deviceMemory<dfloat> o_transportCoeff(std::string key = "") override
   {
+    if (const auto i = phaseKeyIndex(key); i >= 0) {
+      return deviceMemory<dfloat>(o_rho_phases[i]);
+    }
     return deviceMemory<dfloat>(o_rho);
   }
 
@@ -101,6 +132,24 @@ public:
   // two_phase_flow_equations_AT-1.pdf); no-op when no phases are declared. Must be called
   // before solvePressure (hence before solve()) with up-to-date o_alpha_phases.
   void updateMixtureProperties();
+
+  // Plan G (alpha transport): NOT called automatically anywhere -- the UDF drives these,
+  // typically from preFluid, right after scalar->solve() updates the independent alpha
+  // scalar(s) and before fluid->solve() (updateMixtureVelocity/Properties/Forcing all
+  // consume o_alpha_phases, so this must run before those, same "solve alpha first" order).
+  //
+  // Copies o_alpha (e.g. a scalar's solution) into o_alpha_phases[phase]. Not yet clipped to
+  // [0,1] -- no elementwise clamp primitive exists in linAlg currently; add one if sharp
+  // alpha fronts overshoot (the alpha transport equation alone doesn't guarantee
+  // boundedness under spectral-element advection).
+  void setAlphaPhase(int phase, const occa::memory &o_alpha);
+
+  // o_alpha_phases[phase] = 1 - sum of every OTHER o_alpha_phases[k] (general for any
+  // Nphase: summing N independently-discretized transport equations does not exactly
+  // preserve sum_k alpha_k = 1 under discretization error; deriving one phase by
+  // subtraction makes it an algebraic identity instead). Caller picks which phase is
+  // "derived" -- not auto-detected, for determinism.
+  void deriveLastAlphaPhase(int phase);
 
   void makeAdvection(double time, int tstep, int phase);
   void makeExplicit(double time, int tstep, int phase);

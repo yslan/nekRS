@@ -99,8 +99,10 @@ void UDF_Setup()
     nrs->fluid->o_solution().copyFrom(U.data(), U.size());
   }
 
-  // constant 30%/70% volume-fraction split between the two phases (not checkpointed yet,
-  // so set unconditionally rather than guarding on RESTART FILE NAME)
+  // constant 30%/70% volume-fraction split between the two phases -- this example does not
+  // solve alpha (see examples_2phases/term_demo_* for the scalar-transported version, Plan
+  // G). Not checkpointed yet, so set unconditionally rather than guarding on RESTART FILE
+  // NAME.
   platform->linAlg->fill(mesh->Nlocal, 0.3, nrs->fluid->o_alpha_phases[0]);
   platform->linAlg->fill(mesh->Nlocal, 0.7, nrs->fluid->o_alpha_phases[1]);
 
