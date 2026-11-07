@@ -7,27 +7,38 @@
 class fluidSolverCfg_t : public solverCfg_t
 {
 public:
-  std::string velocityName;
+  std::vector<std::string> velocityName;
   std::string pressureName;
   dlong fieldOffset;
   dlong cubatureOffset;
+};
+
+// per-(phase, velocity component) snapshot of an elliptic solve's convergence stats, taken
+// right after that solve() call -- needed because ellipticSolver is a SHARED set reused
+// across phases (see setupEllipticSolver): its live Niter()/residual() state gets
+// overwritten by the next phase's solve before nrs_t::printStepInfo can read it.
+struct velocityConvergence_t {
+  int Niter = 0;
+  dfloat initialGuessResidual = 0;
+  dfloat finalResidual = 0;
 };
 
 class fluidSolver_t : public solver_t
 {
 private:
   void solvePressure(double time, int stage);
-  void solveVelocity(double time, int stage);
+  void solveVelocity(double time, int stage, int phase);
 
-  void advectionSubcycling(int nEXT, double time);
+  void advectionSubcycling(int nEXT, double time, int phase); // TODO
 
   occa::memory o_zeroNormalMask;
   occa::memory o_filterRT;
   int Nsubsteps;
 
-  occa::memory o_ADV;
+  std::vector<occa::memory> o_ADV_phases;
+  std::vector<occa::memory> o_JwF_phases; // phase k's own eq-97 forcing (feeds solveVelocity)
 
-  occa::memory o_U0;
+  occa::memory o_U0; // mixture
   occa::memory o_P0;
   occa::memory o_relUrst0;
   occa::memory o_prop0;
@@ -86,16 +97,34 @@ public:
   void applyDirichlet(double time) override;
   void setupEllipticSolver() override;
 
-  void makeAdvection(double time, int tstep);
-  void makeExplicit(double time, int tstep);
+  // mixture o_rho/o_mue from phase properties + volume fraction (eq 83/84 of
+  // two_phase_flow_equations_AT-1.pdf); no-op when no phases are declared. Must be called
+  // before solvePressure (hence before solve()) with up-to-date o_alpha_phases.
+  void updateMixtureProperties();
+
+  void makeAdvection(double time, int tstep, int phase);
+  void makeExplicit(double time, int tstep, int phase);
+  void makeForcing(int phase);
+
+  // eq 81: u_bar = sum_k alpha_k*u_k (+ re-derives o_div from the new u_bar). Must run before
+  // solvePressure, with phases' velocities/alpha as of the end of the previous iteration.
+  void updateMixtureVelocity();
+
+  // eq 99: combines the per-phase o_ADV_phases[k]/o_JwF_phases[k] (already built earlier in
+  // initInnerStep, before alpha was current) with the now-current o_alpha_phases into the
+  // mixture forcing solvePressure's RHS consumes. Must run after updateMixtureVelocity(),
+  // still before solvePressure.
+  void updateMixtureForcing();
 
   void solve(double time, int stage) override
   {
+    updateMixtureVelocity();
+    updateMixtureForcing();
     solvePressure(time, stage);
-    solveVelocity(time, stage);
+    for (int i=0;i<this->Nphase;i++) {
+      solveVelocity(time, stage, i);
+    }
   };
-
-  void makeForcing();
 
   void updateZeroNormalMask()
   {
@@ -113,8 +142,15 @@ public:
   dlong fieldOffset = -1;
   dlong cubatureOffset = -1;
 
-  std::string velocityName;
-  occa::memory o_velocityName;
+  int Nphase = 1;
+
+  // name of the shared/mixture-level velocity solve (e.g. "fluid velocity"), used for option
+  // lookups and BC/solver setup that still operate on the single shared ellipticSolver set,
+  // as opposed to velocityName[k] (per-phase). Set once in the constructor.
+  std::string mixtureVelocityName;
+
+  std::vector<std::string> velocityName; // TODO, phases
+  std::vector<occa::memory> o_velocityName;
 
   std::string pressureName;
   occa::memory o_pressureName;
@@ -122,18 +158,33 @@ public:
   std::function<occa::memory(double)> userImplicitLinearTerm = nullptr;
   std::function<occa::memory(double, int)> userAdvectionTerm = nullptr;
 
-  occa::memory o_U;
-  occa::memory o_Ue;
-  occa::memory o_div;
+  occa::memory o_U;   // mixture
+  occa::memory o_Ue;  // mixture
+  occa::memory o_div; // mixture
 
   occa::memory o_P;
   occa::memory o_Pe;
 
-  dfloat rho0 = NAN;
-  occa::memory o_rho;
-  occa::memory o_mue;
+  std::vector<occa::memory> o_U_phases;
+  std::vector<occa::memory> o_Ue_phases; // TODO
 
-  occa::memory o_relUrst;
+  // o_EXT_phases[0] always aliases the base-class o_EXT (external consumers -- nrs.cpp's
+  // userSource/dt-heuristic -- keep working against fluid->o_EXT unchanged, always hitting
+  // phase 0's slot); o_EXT_phases[1..] are real per-phase storage when phases are declared.
+  std::vector<occa::memory> o_EXT_phases;
+
+  dfloat rho0 = NAN;
+  occa::memory o_rho; // mixture
+  occa::memory o_mue; // mixture
+  std::vector<occa::memory> o_rho_phases;
+  std::vector<occa::memory> o_mue_phases;
+  std::vector<occa::memory> o_alpha_phases; // vol frac
+
+  // [phase][component] -- component count matches ellipticSolver.size() (1 for block solver,
+  // 3 for separate x/y/z). Populated by solveVelocity(); read by nrs_t::printStepInfo.
+  std::vector<std::vector<velocityConvergence_t>> velocityConvergence;
+
+  occa::memory o_relUrst; // TODO no 2p
 
   void finalize() override
   {

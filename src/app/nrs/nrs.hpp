@@ -145,6 +145,7 @@ public:
   dfloat flowRateScaleFactor();
 
   std::unique_ptr<iofld> checkpointWriter = nullptr;
+  std::vector<std::unique_ptr<iofld>> phaseCheckpointWriters; // p1<case>, p2<case>, ... : vel only, no pr
 
   void evaluateProperties(const double time);
   void evaluateDivergence(const double time);

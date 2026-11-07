@@ -12,7 +12,7 @@
 
 #include <registerKernels.hpp>
 
-int nrs_t::numberActiveFields()
+int nrs_t::numberActiveFields() // Nek5000 won't have any 2phase part
 {
   int fields = 0;
   if (!platform->options.compareArgs("FLUID VELOCITY SOLVER", "NONE")) {
@@ -76,6 +76,13 @@ void nrs_t::printSolutionMinMax()
 
   if (fluid) {
     auto mesh = fluid->mesh;
+
+    // "FLUID U"/"FLUID p" are the mixture fields (eq 81's u_bar, and the one shared
+    // pressure) -- unchanged label/values from before phases existed, still correct since
+    // fluid->o_U/o_P are the properly-reconstructed mixture quantities (see
+    // updateMixtureVelocity()). Per-phase velocity/volume-fraction lines are added below,
+    // only when phases are actually declared (classic case: o_U_phases[0] aliases o_U, so
+    // printing it again would just duplicate the line above).
     auto o_ux = fluid->o_U + 0 * fluid->fieldOffset;
     auto o_uy = fluid->o_U + 1 * fluid->fieldOffset;
     auto o_uz = fluid->o_U + 2 * fluid->fieldOffset;
@@ -96,6 +103,36 @@ void nrs_t::printSolutionMinMax()
 
     if (platform->comm.mpiRank() == 0) {
       printf("%-15s min/max: %g %g\n", "FLUID p", minMax[3].first, minMax[3].second);
+    }
+
+    for (int phase = 0; phase < fluid->Nphase; phase++) {
+      if (fluid->o_alpha_phases.empty()) {
+        break; // classic case: o_U_phases[0] aliases o_U, already printed above
+      }
+
+      const auto &pname = fluid->velocityName[phase];
+      auto o_uxp = fluid->o_U_phases[phase] + 0 * fluid->fieldOffset;
+      auto o_uyp = fluid->o_U_phases[phase] + 1 * fluid->fieldOffset;
+      auto o_uzp = fluid->o_U_phases[phase] + 2 * fluid->fieldOffset;
+
+      const auto minMaxU = platform->linAlg->minMax(mesh->Nlocal, {o_uxp, o_uyp, o_uzp}, platform->comm.mpiComm());
+      const auto minMaxAlpha =
+          platform->linAlg->minMax(mesh->Nlocal, {fluid->o_alpha_phases[phase]}, platform->comm.mpiComm());
+
+      if (platform->comm.mpiRank() == 0) {
+        printf("%-15s min/max: %g %g  %g %g  %g %g\n",
+               ("FLUID " + upperCase(pname) + " U").c_str(),
+               minMaxU[0].first,
+               minMaxU[0].second,
+               minMaxU[1].first,
+               minMaxU[1].second,
+               minMaxU[2].first,
+               minMaxU[2].second);
+        printf("%-15s min/max: %g %g\n",
+               ("FLUID " + upperCase(pname) + " alpha").c_str(),
+               minMaxAlpha[0].first,
+               minMaxAlpha[0].second);
+      }
     }
   }
 
@@ -271,7 +308,7 @@ void nrs_t::init()
     fluid = [&]() {
       fluidSolverCfg_t cfg;
       cfg.name = "fluid";
-      cfg.velocityName = cfg.name + " velocity";
+      cfg.velocityName = {cfg.name + " velocity"};
       cfg.pressureName = cfg.name + " pressure";
       cfg.mesh = meshV;
       cfg.fieldOffset = fieldOffset;
@@ -336,6 +373,12 @@ void nrs_t::init()
     double startTime;
     platform->options.getArgs("START TIME", startTime);
     evaluateProperties(startTime);
+
+    // mixture o_rho/o_mue from phase properties -- must happen before setupEllipticSolver
+    // below, which derives rho0 from o_rho.
+    if (fluid) {
+      fluid->updateMixtureProperties();
+    }
   }
 
   g0 = 1;
@@ -883,23 +926,36 @@ void nrs_t::printRunStat(int step)
     platform->timer.printStatEntry("        find kernel     ", tFindKernel, nFindKernel, tFindpts);
   }
 
-  const double tVelocity = platform->timer.query("fluid velocitySolve", "DEVICE:MAX");
+  // "Solve"/" rhs" are tic'd per-phase in fluidSolver.cpp (tag = velocityName[phase] + ...),
+  // so each phase gets its own line here -- classic case: velocityName[0] == "fluid
+  // velocity", same tags as always. "preconditioner"/"proj" are ticked INSIDE the shared
+  // elliptic object using its own stored name (mixtureVelocityName), so those stay pooled
+  // across phases -- not separable without changing elliptic.cpp itself.
+  auto pad = [](std::string s, size_t width) {
+    if (s.size() < width) {
+      s.append(width - s.size(), ' ');
+    }
+    return s;
+  };
+  for (int phase = 0; phase < fluid->Nphase; phase++) {
+    const auto &vname = fluid->velocityName[phase];
+    const std::string label = (fluid->Nphase == 1) ? "velocitySolve" : vname + "Solve";
 
-  platform->timer.printStatEntry("    velocitySolve       ",
-                                 "fluid velocitySolve",
-                                 "DEVICE:MAX",
-                                 tElapsedTimeSolve);
-  platform->timer.printStatEntry("      rhs               ", "fluid velocity rhs", "DEVICE:MAX", tVelocity);
+    const double tVelocity = platform->timer.query(vname + "Solve", "DEVICE:MAX");
+
+    platform->timer.printStatEntry(pad("    " + label, 24), vname + "Solve", "DEVICE:MAX", tElapsedTimeSolve);
+    platform->timer.printStatEntry("      rhs               ", vname + " rhs", "DEVICE:MAX", tVelocity);
+  }
   platform->timer.printStatEntry("      preconditioner    ",
                                  "fluid velocity preconditioner",
                                  "DEVICE:MAX",
-                                 tVelocity);
+                                 tElapsedTimeSolve);
 
   platform->timer.set("fluid velocity proj",
                       platform->timer.query("fluid velocity proj pre", "DEVICE:MAX") +
                           platform->timer.query("fluid velocity proj post", "DEVICE:MAX"),
                       platform->timer.count("fluid velocity proj pre"));
-  platform->timer.printStatEntry("      initial guess     ", "fluid velocity proj", "DEVICE:MAX", tVelocity);
+  platform->timer.printStatEntry("      initial guess     ", "fluid velocity proj", "DEVICE:MAX", tElapsedTimeSolve);
 
   const double tPressure = platform->timer.query("fluid pressureSolve", "DEVICE:MAX");
   platform->timer.printStatEntry("    pressureSolve       ",
@@ -1070,6 +1126,20 @@ void nrs_t::printStepInfo(double time, int tstep, bool printStepInfo, bool solve
            solver->finalResidual());
   };
 
+  // fluid->ellipticSolver is a SHARED set reused across phases (see
+  // fluidSolver_t::setupEllipticSolver) -- its live Niter()/residual() only reflects the
+  // LAST phase solved, so per-phase stats come from fluid->velocityConvergence (snapshotted
+  // by solveVelocity() right after each phase's own solve, before the next phase overwrites
+  // the shared solver's state).
+  auto printVelocityConvergence = [tstep](const velocityConvergence_t &c, const std::string &name) {
+    printf("step=%-8d %-20s: iter %03d  resNorm0 %.2e  resNorm %.2e\n",
+           tstep,
+           name.c_str(),
+           c.Niter,
+           c.initialGuessResidual,
+           c.finalResidual);
+  };
+
   const auto [divUErrVolAvg, divUErrL2] = [&]() {
     auto mesh = fluid->mesh;
 
@@ -1108,12 +1178,18 @@ void nrs_t::printStepInfo(double time, int tstep, bool printStepInfo, bool solve
       if (!platform->options.compareArgs("FLUID VELOCITY SOLVER", "NONE")) {
         printSolverInfo(fluid->ellipticSolverP, "FLUID p");
 
-        if (fluid->ellipticSolver.size() == 1) {
-          printSolverInfo(fluid->ellipticSolver.at(0), "FLUID U");
-        } else if (fluid->ellipticSolver.size() == 3) {
-          printSolverInfo(fluid->ellipticSolver.at(0), "FLUID ux");
-          printSolverInfo(fluid->ellipticSolver.at(1), "FLUID uy");
-          printSolverInfo(fluid->ellipticSolver.at(2), "FLUID uz");
+        for (int phase = 0; phase < fluid->Nphase; phase++) {
+          const std::string prefix =
+              (fluid->Nphase == 1) ? "FLUID" : "FLUID " + upperCase(fluid->velocityName[phase]);
+          const auto &conv = fluid->velocityConvergence[phase];
+          if (conv.size() == 1) {
+            printVelocityConvergence(conv[0], prefix + " U");
+          } else {
+            static const char *comp[3] = {"x", "y", "z"};
+            for (size_t c = 0; c < conv.size() && c < 3; c++) {
+              printVelocityConvergence(conv[c], prefix + " u" + comp[c]);
+            }
+          }
         }
 
         printf("step=%-8d %-20s: %.2e  %.2e\n", tstep, "FLUID divUErr", divUErrVolAvg, divUErrL2);
@@ -1275,6 +1351,40 @@ void nrs_t::writeCheckpoint(double t, bool enforceOutXYZ, bool enforceFP64, int 
   }
 
   checkpointWriter->process();
+
+  // p1<case>, p2<case>, ...: phase velocity only, no pressure (see note_2phases.md schema)
+  if (fluid && !fluid->o_U_phases.empty()) {
+    auto visMesh = meshT;
+
+    phaseCheckpointWriters.resize(fluid->o_U_phases.size());
+    for (size_t k = 0; k < fluid->o_U_phases.size(); k++) {
+      auto &writer = phaseCheckpointWriters[k];
+      if (!writer) {
+        writer = iofldFactory::create();
+      }
+
+      if (!writer->isInitialized()) {
+        const std::string prefix = "p" + std::to_string(k + 1); // 1-based: p1, p2
+        writer->open(visMesh, iofld::mode::write, prefix + platform->options.getArgs("CASENAME"));
+
+        if (platform->options.compareArgs(upperCase(fluid->velocityName[k]) + " CHECKPOINTING", "TRUE")) {
+          std::vector<occa::memory> o_V;
+          for (int i = 0; i < meshV->dim; i++) {
+            o_V.push_back(fluid->o_U_phases[k].slice(i * fluid->fieldOffset, visMesh->Nlocal));
+          }
+          writer->addVariable("velocity", o_V);
+          // deliberately no "pressure" variable -- phase checkpoints hold vel only
+        }
+      }
+
+      writer->writeAttribute("polynomialOrder", std::to_string(Nfld));
+      writer->writeAttribute("precision", (FP64) ? "64" : "32");
+      writer->writeAttribute("uniform", (uniform) ? "true" : "false");
+      writer->writeAttribute("outputMesh", (outXYZ) ? "true" : "false");
+      writer->addVariable("time", t);
+      writer->process();
+    }
+  }
 }
 
 int nrs_t::lastStepLocalSession(double timeNew, int tstep, double elapsedTime)
@@ -1664,7 +1774,11 @@ void nrs_t::initInnerStep(double time, dfloat _dt, int _tstep)
   }
 
   if (fluid) {
-    platform->linAlg->fill(fluid->fieldOffsetSum, 0.0, fluid->o_EXT);
+    // zero every phase's own o_EXT_phases[k]; phase 0 aliases the bare fluid->o_EXT that
+    // userSource (below) still writes into unchanged.
+    for (int i = 0; i < fluid->Nphase; i++) {
+      platform->linAlg->fill(fluid->fieldOffsetSum, 0.0, fluid->o_EXT_phases[i]);
+    }
   }
 
   if (userSource) {
@@ -1695,11 +1809,13 @@ void nrs_t::initInnerStep(double time, dfloat _dt, int _tstep)
   if (fluid) {
     platform->timer.tic("makef");
 
-    if (platform->options.compareArgs("EQUATION TYPE", "NAVIERSTOKES")) {
-      fluid->makeAdvection(time, tstep);
+    for (int i = 0; i < fluid->Nphase; i++) {
+      if (platform->options.compareArgs("EQUATION TYPE", "NAVIERSTOKES")) {
+        fluid->makeAdvection(time, tstep, i);
+      }
+      fluid->makeExplicit(time, tstep, i);
+      fluid->makeForcing(i);
     }
-    fluid->makeExplicit(time, tstep);
-    fluid->makeForcing();
 
     platform->timer.toc("makef");
   }
@@ -1774,6 +1890,12 @@ bool nrs_t::runInnerStep(std::function<bool(int)> convergenceCheck, int iter, bo
   }
 
   if (fluid) {
+    // refresh mixture o_rho/o_mue from current phase properties before applyDirichlet,
+    // since pressureDirichletBCHex3D/velocityDirichletBCHex3D consume them directly;
+    // updateMixtureProperties() is called again below (after userProperties) in case that
+    // hook updates phases' material properties for the elliptic solve itself.
+    fluid->updateMixtureProperties();
+
     fluid->applyDirichlet(timeNew);
     if (neknek && fieldsToSolveContains("fluid velocity")) {
       if (!platform->app->bc->hasOutflow("fluid velocity")) {
@@ -1807,6 +1929,10 @@ bool nrs_t::runInnerStep(std::function<bool(int)> convergenceCheck, int iter, bo
   }
 
   if (fluid) {
+    // userProperties (evaluateProperties above) may have updated phases' material
+    // properties; refresh the mixture o_rho/o_mue from them before solvePressure runs.
+    fluid->updateMixtureProperties();
+
     fluid->solve(timeNew, iter);
 
     if (platform->options.compareArgs("CONSTANT FLOW RATE", "TRUE")) {
