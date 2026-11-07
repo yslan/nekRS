@@ -25,7 +25,8 @@ private:
   occa::memory o_filterRT;
   int Nsubsteps;
 
-  occa::memory o_ADV; // TODO phases
+  std::vector<occa::memory> o_ADV_phases;
+  std::vector<occa::memory> o_JwF_phases; // phase k's own eq-97 forcing (feeds solveVelocity)
 
   occa::memory o_U0; // mixture
   occa::memory o_P0;
@@ -93,16 +94,27 @@ public:
 
   void makeAdvection(double time, int tstep, int phase);
   void makeExplicit(double time, int tstep, int phase);
+  void makeForcing(int phase);
+
+  // eq 81: u_bar = sum_k alpha_k*u_k (+ re-derives o_div from the new u_bar). Must run before
+  // solvePressure, with phases' velocities/alpha as of the end of the previous iteration.
+  void updateMixtureVelocity();
+
+  // eq 99: combines the per-phase o_ADV_phases[k]/o_JwF_phases[k] (already built earlier in
+  // initInnerStep, before alpha was current) with the now-current o_alpha_phases into the
+  // mixture forcing solvePressure's RHS consumes. Must run after updateMixtureVelocity(),
+  // still before solvePressure.
+  void updateMixtureForcing();
 
   void solve(double time, int stage) override
   {
+    updateMixtureVelocity();
+    updateMixtureForcing();
     solvePressure(time, stage);
     for (int i=0;i<this->Nphase;i++) {
       solveVelocity(time, stage, i);
     }
   };
-
-  void makeForcing();
 
   void updateZeroNormalMask()
   {
@@ -145,6 +157,11 @@ public:
 
   std::vector<occa::memory> o_U_phases;
   std::vector<occa::memory> o_Ue_phases; // TODO
+
+  // o_EXT_phases[0] always aliases the base-class o_EXT (external consumers -- nrs.cpp's
+  // userSource/dt-heuristic -- keep working against fluid->o_EXT unchanged, always hitting
+  // phase 0's slot); o_EXT_phases[1..] are real per-phase storage when phases are declared.
+  std::vector<occa::memory> o_EXT_phases;
 
   dfloat rho0 = NAN;
   occa::memory o_rho; // mixture

@@ -1704,7 +1704,11 @@ void nrs_t::initInnerStep(double time, dfloat _dt, int _tstep)
   }
 
   if (fluid) {
-    platform->linAlg->fill(fluid->fieldOffsetSum, 0.0, fluid->o_EXT);
+    // zero every phase's own o_EXT_phases[k]; phase 0 aliases the bare fluid->o_EXT that
+    // userSource (below) still writes into unchanged.
+    for (int i = 0; i < fluid->Nphase; i++) {
+      platform->linAlg->fill(fluid->fieldOffsetSum, 0.0, fluid->o_EXT_phases[i]);
+    }
   }
 
   if (userSource) {
@@ -1740,8 +1744,8 @@ void nrs_t::initInnerStep(double time, dfloat _dt, int _tstep)
         fluid->makeAdvection(time, tstep, i);
       }
       fluid->makeExplicit(time, tstep, i);
+      fluid->makeForcing(i);
     }
-    fluid->makeForcing();
 
     platform->timer.toc("makef");
   }

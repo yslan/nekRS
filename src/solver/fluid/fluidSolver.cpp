@@ -111,9 +111,26 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
 
   o_div = platform->device.malloc<dfloat>(fieldOffset);
 
-  o_JwF = platform->device.malloc<dfloat>(fieldOffsetSum);
   o_EXT = platform->device.malloc<dfloat>(o_coeffEXT.size() * fieldOffsetSum);
-  o_ADV = platform->device.malloc<dfloat>(o_coeffEXT.size() * fieldOffsetSum);
+
+  // bare o_JwF is now exclusively "the combined mixture forcing for the pressure RHS" (eq 99),
+  // written by updateMixtureForcing() from the per-phase pieces below; solvePressure's
+  // reference to it is otherwise unchanged. o_ADV is fully per-phase (no external consumers).
+  // o_EXT stays per-phase too but phase 0 aliases the bare o_EXT above so userSource/the
+  // dt-heuristic in nrs.cpp keep working against fluid->o_EXT unchanged.
+  o_JwF = platform->device.malloc<dfloat>(fieldOffsetSum);
+
+  o_ADV_phases.resize(Nphase);
+  o_JwF_phases.resize(Nphase);
+  o_EXT_phases.resize(Nphase);
+  o_EXT_phases[0] = o_EXT;
+  for (int i = 0; i < Nphase; i++) {
+    o_ADV_phases[i] = platform->device.malloc<dfloat>(o_coeffEXT.size() * fieldOffsetSum);
+    o_JwF_phases[i] = platform->device.malloc<dfloat>(fieldOffsetSum);
+    if (i > 0) {
+      o_EXT_phases[i] = platform->device.malloc<dfloat>(o_coeffEXT.size() * fieldOffsetSum);
+    }
+  }
 
   {
     const dlong Nstates = Nsubsteps ? std::max(o_coeffBDF.size(), o_coeffEXT.size()) : 1;
@@ -232,6 +249,64 @@ void fluidSolver_t::updateMixtureProperties()
   platform->linAlg->axmyz(mesh->Nlocal, 1.0, o_rho, o_nuSum, o_mue);
 }
 
+// eq 81: u_bar = sum_k alpha_k*u_k, reconstructed at every BDF/EXT history level stored in
+// o_U/o_U_phases (each phase's CURRENT alpha_k is used at every level -- alpha has no lag
+// history of its own yet, a documented approximation, same as elsewhere). Classic case:
+// o_U_phases[0] already aliases o_U directly (solveVelocity wrote it there), nothing to do.
+void fluidSolver_t::updateMixtureVelocity()
+{
+  if (o_alpha_phases.empty()) {
+    return;
+  }
+
+  const int nLevels = std::max(static_cast<int>(o_coeffBDF.size()), static_cast<int>(o_coeffEXT.size()));
+  for (int s = 0; s < nLevels; s++) {
+    auto o_level = o_U.slice(s * fieldOffsetSum, fieldOffsetSum);
+    platform->linAlg->fill(fieldOffsetSum, 0.0, o_level);
+    for (int k = 0; k < Nphase; k++) {
+      auto o_term = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+      o_term.copyFrom(o_U_phases[k].slice(s * fieldOffsetSum, fieldOffsetSum), fieldOffsetSum);
+      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_alpha_phases[k], o_term);
+      platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, 1.0, o_term, 1.0, o_level);
+    }
+  }
+}
+
+// eq 99: the pressure-equation forcing is density-FREE: sum_k alpha_k*(BDF(u_k)+ADV(u_k)).
+// o_JwF_phases[k] (from makeForcing(), built earlier in initInnerStep) is rho_k*(BDF+ADV)
+// (eq 97's own, correctly-scaled form, needed as-is by solveVelocity). So here: divide each
+// phase's forcing by its own rho_k, weight by alpha_k, sum (density-free) -- then re-scale
+// the sum by rho_bar, so that solvePressure's existing kernel (which multiplies the whole
+// o_JwF by 1/rho_bar) recovers exactly that density-free quantity, same as it already does
+// for the single-phase case (rho_bar==rho there, so the two factors cancel exactly). Writes
+// into the bare o_JwF member, which solvePressure already reads unchanged. Classic case is
+// just a copy (rho_bar==rho_0, so the divide-then-rescale is a no-op); unlike
+// updateMixtureVelocity(), this always runs -- o_JwF_phases[0] is never aliased to bare
+// o_JwF (phase 0's own forcing must survive past this call, for solveVelocity(0) to use).
+void fluidSolver_t::updateMixtureForcing()
+{
+  if (o_alpha_phases.empty()) {
+    o_JwF.copyFrom(o_JwF_phases[0], fieldOffsetSum);
+    return;
+  }
+
+  // o_JwF_phases[k] (sumMakef's output) is ALREADY density-free -- confirmed by reading
+  // sumMakef.okl: RHO is passed in but never referenced in the kernel body; density is
+  // applied downstream, at the point of use (velocityRhsHex3D multiplies by RHO explicitly;
+  // pressureRhsHex3D adds BF/o_JwF with NO density factor at all, iRHO=1/rho_bar only
+  // multiplies the separate viscous-stress correction term). So eq 99's density-free sum is
+  // exactly sum_k alpha_k*o_JwF_phases[k] -- no rho_k division or rho_bar rescaling needed.
+  // (An earlier version of this function incorrectly assumed o_JwF_phases[k] was rho_k-scaled
+  // and divided it out before rescaling by rho_bar -- see [[03_derivation_vs_code_log]].)
+  platform->linAlg->fill(fieldOffsetSum, 0.0, o_JwF);
+  for (int k = 0; k < Nphase; k++) {
+    auto o_term = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+    o_term.copyFrom(o_JwF_phases[k], fieldOffsetSum);
+    platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_alpha_phases[k], o_term); // *= alpha_k
+    platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, 1.0, o_term, 1.0, o_JwF);
+  }
+}
+
 void fluidSolver_t::solvePressure(double time, int stage)
 {
   if (!ellipticSolverP) {
@@ -318,15 +393,9 @@ void fluidSolver_t::solvePressure(double time, int stage)
     return o_stressTerm;
   }();
 
-  // TODO 2phase (eq 99/101): o_JwF (passed below) is built by makeForcing() from the MIXTURE
-  // o_U/o_ADV -- i.e. it currently contains gamma0/dt*u_bar - sum a_q*u_bar^(n-q)/dt PLUS a
-  // single advection term computed from the mixture velocity directly. Per eq 99 this is only
-  // correct for the BDF/EXT time-derivative part (u_bar is a genuine mixture quantity); the
-  // advection part must instead be sum_k alpha_k^(n+1) * sum_q b_q*(u_k . grad u_k)^(n-q), a
-  // PHASE-WEIGHTED SUM of each phase's own extrapolated advection -- NOT advection evaluated
-  // on u_bar (advection is nonlinear, so these are not equal). Needs per-phase o_ADV_phases[k]
-  // (see makeAdvection/makeForcing below) combined with alpha_k here, separately from the
-  // time-derivative term.
+  // o_JwF here is the alpha-weighted combination of each phase's own (density-free) forcing
+  // (eq 99), built by updateMixtureForcing() -- called at the top of solve(), before
+  // solvePressure.
   auto o_rhs = [&]() {
     auto o_gradDiv = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
 
@@ -828,16 +897,22 @@ void fluidSolver_t::applyDirichlet(double time)
   }
 }
 
-// TODO 2phase (eq 92/97 vs eq 99): combines BDF+advection+rho into one mixture o_JwF from
-// mixture o_U/o_ADV. Needs to produce TWO different things instead: (a) per-phase
-// o_JwF_phases[k] built from o_rho_phases[k]/o_U_phases[k]/o_ADV_phases[k] for solveVelocity's
-// RHS, and (b) an alpha_k-weighted sum of just the phase advection terms for solvePressure's
-// RHS (eq 99) -- these must not be the same quantity.
-void fluidSolver_t::makeForcing()
+// Phase k's own forcing (BDF time-derivative + advection of u_k) -- density-free, same as
+// the single-phase sumMakef output always was (RHO is passed to the kernel but unused there;
+// density is applied downstream at the point of use: velocityRhsHex3D multiplies by rho_k
+// explicitly for solveVelocity's RHS (eq 97); updateMixtureForcing() just alpha-weights and
+// sums this directly for the pressure RHS (eq 99), no rho conversion needed either way.
+void fluidSolver_t::makeForcing(int phase)
 {
   if (ellipticSolver.size() == 0) {
     return;
   }
+
+  auto &o_rho_k = o_rho_phases[phase];
+  auto &o_Uphase = o_U_phases[phase];
+  auto &o_ADVphase = o_ADV_phases[phase];
+  auto &o_EXTphase = o_EXT_phases[phase];
+  auto &o_JwFphase = o_JwF_phases[phase];
 
   launchKernel("fluidSolver_t::sumMakef",
                mesh->Nlocal,
@@ -848,44 +923,39 @@ void fluidSolver_t::makeForcing()
                fieldOffset,
                fieldOffsetSum,
                mesh->fieldOffset, /* o_Jw offset */
-               o_rho,
-               o_U,
-               o_ADV,
-               o_EXT,
-               o_JwF);
+               o_rho_k,
+               o_Uphase,
+               o_ADVphase,
+               o_EXTphase,
+               o_JwFphase);
 
   dfloat flops = Nsubsteps ? (6 + 6 * o_coeffEXT.size()) : (6 * o_coeffEXT.size() + 12 * o_coeffBDF.size());
-  platform->flopCounter->add(mixtureVelocityName + " sumMakef", flops * static_cast<double>(mesh->Nlocal));
+  platform->flopCounter->add(velocityName[phase] + " sumMakef", flops * static_cast<double>(mesh->Nlocal));
 
   if (platform->verbose()) {
     const dfloat debugNorm = platform->linAlg->weightedNorm2Many(mesh->Nlocal,
                                                                  mesh->dim,
                                                                  fieldOffset,
                                                                  mesh->ogs->o_invDegree,
-                                                                 o_JwF,
+                                                                 o_JwFphase,
                                                                  platform->comm.mpiComm());
     if (platform->comm.mpiRank() == 0) {
-      printf("%s JwF norm: %.15e\n", name.c_str(), debugNorm);
+      printf("%s JwF norm: %.15e\n", velocityName[phase].c_str(), debugNorm);
     }
   }
 
   for (int s = o_coeffEXT.size(); s > 1; s--) {
-    o_EXT.copyFrom(o_EXT, fieldOffsetSum, (s - 1) * fieldOffsetSum, (s - 2) * fieldOffsetSum);
-    if (o_ADV.isInitialized()) {
-      o_ADV.copyFrom(o_ADV, fieldOffsetSum, (s - 1) * fieldOffsetSum, (s - 2) * fieldOffsetSum);
+    o_EXTphase.copyFrom(o_EXTphase, fieldOffsetSum, (s - 1) * fieldOffsetSum, (s - 2) * fieldOffsetSum);
+    if (o_ADVphase.isInitialized()) {
+      o_ADVphase.copyFrom(o_ADVphase, fieldOffsetSum, (s - 1) * fieldOffsetSum, (s - 2) * fieldOffsetSum);
     }
   }
 }
 
-// TODO (eq 92/99): advection is still evaluated once on the mixture o_U into a single o_ADV
-// (not per phase, not alpha_k-weighted -- see makeForcing TODO), so only phase 0's call does
-// anything; other phases' calls (from the per-phase loop in nrs.cpp) are a deliberate no-op.
+// o_Uconv (o_relUrst, the ALE/mesh-relative convecting velocity) stays mixture-level/shared
+// across phases -- the mesh's own motion doesn't differ per phase, so this isn't split.
 void fluidSolver_t::makeAdvection(double time, int tstep, int phase)
 {
-  if (phase != 0) {
-    return;
-  }
-
   if (userAdvectionTerm) {
     userAdvectionTerm(time, tstep);
     return;
@@ -895,6 +965,8 @@ void fluidSolver_t::makeAdvection(double time, int tstep, int phase)
     advectionSubcycling(std::min(tstep, static_cast<int>(o_coeffEXT.size())), time, phase);
   } else {
     auto &o_Uconv = o_relUrst;
+    auto &o_Uphase = o_U_phases[phase];
+    auto &o_ADVphase = o_ADV_phases[phase];
 
     double flopCount = 0.0;
 
@@ -907,9 +979,9 @@ void fluidSolver_t::makeAdvection(double time, int tstep, int phase)
                    mesh->o_cubProjectT,
                    fieldOffset,
                    cubatureOffset,
-                   o_U,
+                   o_Uphase,
                    o_Uconv,
-                   o_ADV);
+                   o_ADVphase);
 
       flopCount += 4. * mesh->Nq *
                    (mesh->cubNp + mesh->cubNq * mesh->cubNq * mesh->Nq +
@@ -923,16 +995,16 @@ void fluidSolver_t::makeAdvection(double time, int tstep, int phase)
                    mesh->o_vgeo,
                    mesh->o_D,
                    fieldOffset,
-                   o_U,
+                   o_Uphase,
                    o_Uconv,
-                   o_ADV);
+                   o_ADVphase);
 
       flopCount += 8 * (mesh->Np * mesh->Nq + mesh->Np);
     }
 
     flopCount *= mesh->Nelements;
     flopCount *= mesh->dim;
-    platform->flopCounter->add(mixtureVelocityName + " advection", flopCount);
+    platform->flopCounter->add(velocityName[phase] + " advection", flopCount);
   }
 }
 
@@ -941,32 +1013,32 @@ void fluidSolver_t::makeAdvection(double time, int tstep, int phase)
 // phase 0's call does anything, matching makeAdvection's pattern.
 void fluidSolver_t::makeExplicit(double time, int tstep, int phase)
 {
-  if (phase != 0) {
-    return;
-  }
-
   if (ellipticSolver.size() == 0) {
     return;
   }
 
-  if (platform->options.compareArgs(upperCase(mixtureVelocityName) + " REGULARIZATION METHOD", "HPFRT")) {
-    dfloat strength = NAN;
-    platform->options.getArgs(upperCase(mixtureVelocityName) + " HPFRT STRENGTH", strength);
+  auto &o_Uphase = o_U_phases[phase];
+  auto &o_EXTphase = o_EXT_phases[phase];
+  const auto &name_k = velocityName[phase]; // PHASEk REGULARIZATION, inherited from FLUID VELOCITY if unset
 
-    launchKernel("core-vectorFilterRTHex3D", mesh->Nelements, o_filterRT, strength, fieldOffset, o_U, o_EXT);
+  if (platform->options.compareArgs(upperCase(name_k) + " REGULARIZATION METHOD", "HPFRT")) {
+    dfloat strength = NAN;
+    platform->options.getArgs(upperCase(name_k) + " HPFRT STRENGTH", strength);
+
+    launchKernel("core-vectorFilterRTHex3D", mesh->Nelements, o_filterRT, strength, fieldOffset, o_Uphase, o_EXTphase);
 
     double flops = 24 * mesh->Np * mesh->Nq + 3 * mesh->Np;
     flops *= static_cast<double>(mesh->Nelements);
-    platform->flopCounter->add(mixtureVelocityName + " filterRT", flops);
+    platform->flopCounter->add(name_k + " filterRT", flops);
   }
 
-  if (platform->options.compareArgs(upperCase(mixtureVelocityName) + " REGULARIZATION METHOD", "GJP")) {
+  if (platform->options.compareArgs(upperCase(name_k) + " REGULARIZATION METHOD", "GJP")) {
     dfloat tauFactor;
-    platform->options.getArgs(upperCase(mixtureVelocityName) + " REGULARIZATION GJP SCALING COEFF", tauFactor);
+    platform->options.getArgs(upperCase(name_k) + " REGULARIZATION GJP SCALING COEFF", tauFactor);
 
     for (int i = 0; i < mesh->dim; i++) {
-      auto o_EXTi = o_EXT.slice(i * fieldOffset, mesh->Nlocal);
-      addGJP(mesh, o_EToB, fieldOffset, o_U, o_U.slice(i * fieldOffset, mesh->Nlocal), o_EXTi, tauFactor);
+      auto o_EXTi = o_EXTphase.slice(i * fieldOffset, mesh->Nlocal);
+      addGJP(mesh, o_EToB, fieldOffset, o_Uphase, o_Uphase.slice(i * fieldOffset, mesh->Nlocal), o_EXTi, tauFactor);
     }
   }
 
@@ -978,11 +1050,11 @@ void fluidSolver_t::makeExplicit(double time, int tstep, int phase)
                  fieldOffset,
                  geom->fieldOffset,
                  geom->o_U,
-                 o_U,
-                 o_EXT);
+                 o_Uphase,
+                 o_EXTphase);
     double flops = 54 * mesh->Np * mesh->Nq + 63 * mesh->Np;
     flops *= static_cast<double>(mesh->Nelements);
-    platform->flopCounter->add(mixtureVelocityName + " advectMeshVelocity", flops);
+    platform->flopCounter->add(name_k + " advectMeshVelocity", flops);
   }
 }
 
@@ -1040,15 +1112,28 @@ void fluidSolver_t::extrapolateSolution()
   }
 }
 
-// TODO 2phase: only lags the mixture o_U history; each phase's o_U_phases[k] needs its own
-// BDF/EXT lag history the same way (same gap in saveSolutionState/restoreSolutionState, which
-// only snapshot mixture o_U/o_prop too).
+// TODO: saveSolutionState/restoreSolutionState still only snapshot the mixture o_U/o_prop,
+// not o_U_phases -- unrelated to the lag-history fix below (outer-iteration state restore,
+// not timestep history).
 void fluidSolver_t::lagSolution()
 {
   {
     const auto n = std::max(o_coeffEXT.size(), o_coeffBDF.size());
     for (int s = n; s > 1; s--) {
       o_U.copyFrom(o_U, fieldOffsetSum, (s - 1) * fieldOffsetSum, (s - 2) * fieldOffsetSum);
+    }
+  }
+
+  // classic case: o_U_phases[0] aliases o_U (just shifted above) -- skip it here to avoid a
+  // double shift. 2-phase case: o_U is reconstructed fresh each step from o_U_phases (see
+  // updateMixtureVelocity), so its own shift above is redundant-but-harmless there; what
+  // actually needs shifting is each phase's OWN history, used by makeForcing's BDF term.
+  if (!o_alpha_phases.empty()) {
+    const auto n = std::max(o_coeffEXT.size(), o_coeffBDF.size());
+    for (int k = 0; k < Nphase; k++) {
+      for (int s = n; s > 1; s--) {
+        o_U_phases[k].copyFrom(o_U_phases[k], fieldOffsetSum, (s - 1) * fieldOffsetSum, (s - 2) * fieldOffsetSum);
+      }
     }
   }
 
@@ -1060,12 +1145,13 @@ void fluidSolver_t::lagSolution()
   }
 }
 
-// TODO: subcycles the mixture o_U only, same eq 92/99 concern as makeAdvection -- only ever
-// called with phase==0 (makeAdvection already early-returns otherwise).
 void fluidSolver_t::advectionSubcycling(int nEXT, double time, int phase)
 {
   const auto nFields = mesh->dim;
   const auto fieldOffsetSum = nFields * fieldOffset;
+
+  auto &o_Uphase = o_U_phases[phase];
+  auto &o_JwFphase = o_JwF_phases[phase];
 
   static occa::kernel kernel;
   if (!kernel.isInitialized()) {
@@ -1076,7 +1162,7 @@ void fluidSolver_t::advectionSubcycling(int nEXT, double time, int phase)
     }
   }
 
-  platform->linAlg->fill(o_JwF.size(), 0, o_JwF);
+  platform->linAlg->fill(o_JwFphase.size(), 0, o_JwFphase);
 
   advectionSubcyclingRK(mesh,
                         mesh,
@@ -1094,18 +1180,18 @@ void fluidSolver_t::advectionSubcycling(int nEXT, double time, int phase)
                         fieldOffsetSum,
                         (geom) ? geom->o_div : o_NULL,
                         o_relUrst,
-                        o_U,
-                        o_JwF);
+                        o_Uphase,
+                        o_JwFphase);
 
   if (platform->verbose()) {
     const dfloat debugNorm = platform->linAlg->weightedNorm2Many(mesh->Nlocal,
                                                                  mesh->dim,
                                                                  fieldOffset,
                                                                  mesh->ogs->o_invDegree,
-                                                                 o_JwF,
+                                                                 o_JwFphase,
                                                                  platform->comm.mpiComm());
     if (platform->comm.mpiRank() == 0) {
-      printf("%s advSub norm: %.15e\n", name.c_str(), debugNorm);
+      printf("%s advSub norm: %.15e\n", velocityName[phase].c_str(), debugNorm);
     }
   }
 }
