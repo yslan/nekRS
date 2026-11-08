@@ -31,6 +31,18 @@ private:
 
   void advectionSubcycling(int nEXT, double time, int phase); // TODO
 
+  // Sum_{s=0}^{nLevels-1} o_coeff[s] * o_field[level s] -- o_field is a multi-level buffer
+  // (levels strided by fieldOffsetSum, i.e. mesh->dim stacked fieldOffset-sized components
+  // per level); o_coeff is read back to host (nLevels is tiny, O(2-3), negligible cost) so
+  // plain axpby can be used level-by-level over the whole fieldOffsetSum-sized block at once
+  // (component-agnostic -- axpby has no notion of fieldOffset/stride, so this works
+  // identically whether o_field represents 1 or mesh->dim components). Writes a single
+  // level's worth (fieldOffsetSum) into o_out. Used by updateMixtureForcing() (Plan J) for
+  // both the BDF-of-o_U and EXT-of-o_ADV_phases[k] combinations, which need the SAME
+  // "weighted sum over lag levels" arithmetic sumMakef.okl already does internally but never
+  // exposes on its own.
+  void combineLagLevels(const occa::memory &o_coeff, const occa::memory &o_field, int nLevels, occa::memory &o_out);
+
   occa::memory o_zeroNormalMask;
   occa::memory o_filterRT;
   int Nsubsteps;
@@ -155,14 +167,30 @@ public:
   void makeExplicit(double time, int tstep, int phase);
   void makeForcing(int phase);
 
-  // eq 81: u_bar = sum_k alpha_k*u_k (+ re-derives o_div from the new u_bar). Must run before
-  // solvePressure, with phases' velocities/alpha as of the end of the previous iteration.
+  // (v2, 81): u_bar = sum_k alpha_k*u_k -- writes ONLY o_U's CURRENT (level 0) entry, using
+  // TODAY's alpha_k^{n+1} and o_U_phases[k]'s own level-0 (at this call site: last step's
+  // converged interior values, but THIS step's freshly-applyDirichlet()-enforced boundary
+  // values -- solveVelocity() for this step hasn't run yet). Older levels are left untouched:
+  // lagSolution() already shifted them down at the top of this timestep, and each was itself
+  // written by a PAST call to this same function using THAT step's own alpha -- so o_U's lag
+  // history carries the TRUE historical mixture velocity at every level, with no separate
+  // alpha-lag array needed. Plan J (fixed a bug where this used to rebuild ALL levels every
+  // call with today's alpha, corrupting the historical ones): see wk_claude/plans/J_*.md.
+  // MUST stay called before solvePressure() (same spot as before this fix) -- solvePressure's
+  // boundary flux term reads o_U's level-0 boundary nodes directly, which need this step's
+  // fresh Dirichlet values recombined in; moving this call to run after solveVelocity()
+  // instead (tried, reverted) left solvePressure reading a stale boundary value and blew up
+  // the very next step.
   void updateMixtureVelocity();
 
-  // eq 99: combines the per-phase o_ADV_phases[k]/o_JwF_phases[k] (already built earlier in
-  // initInnerStep, before alpha was current) with the now-current o_alpha_phases into the
-  // mixture forcing solvePressure's RHS consumes. Must run after updateMixtureVelocity(),
-  // still before solvePressure.
+  // (v2, 108)'s forcing bracket: Sum_q a_q*ubar^{n-q}/dt - Sum_k alpha_k^{n+1}*[Sum_q
+  // b_q*(u_k.grad(u_k))^{n-q}]. The BDF part comes directly from o_U's OWN (correct, see
+  // updateMixtureVelocity) lag history -- NOT alpha-reweighted. Only the nonlinear
+  // self-advection sum is alpha-weighted, phase by phase, using each phase's own
+  // o_ADV_phases[k] lag history (already built in initInnerStep) BEFORE it was combined with
+  // the BDF part into o_JwF_phases[k] -- so this does NOT reuse o_JwF_phases[k] wholesale
+  // (Plan J fixed a bug where it used to: Sum_k alpha_k^{n+1}*o_JwF_phases[k], which
+  // incorrectly applied today's alpha to the BDF part too). Must run before solvePressure.
   void updateMixtureForcing();
 
   void solve(double time, int stage) override
