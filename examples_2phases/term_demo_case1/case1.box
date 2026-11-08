@@ -1,0 +1,27 @@
+case1.rea
+-3                      spatial dimension  ( < 0 --> generate .rea/.re2 pair)
+1                       number of fields
+#=======================================================================
+#
+#  term_demo_case1 -- Shaver et al. (Trans. ANS 116, 2017) first test case.
+#  "1D via 2D rectangular mesh": inlet/outlet normal to the flow (x), SYM on
+#  the two long sides (y), single periodic layer (z) to keep it a thin 3D
+#  box standing in for a 2D case. Nondimensional domain length = 1 (paper's
+#  z-coordinate maps to this mesh's x).
+#
+#  IN/OUT (not "E") for west/east: a literal "E" is genbox's own default for
+#  every ORDINARY interior element face too (any non-edge element's west face
+#  is unconditionally written as "E", identical to a true boundary "E"), so
+#  usrdat2 cannot tell a real exposed boundary from an interior face by string
+#  match alone when both say "E". Giving the real boundary a distinct code
+#  (like SYM/W already do) is what makes case1.usr's cbc-string match in
+#  usrdat2 actually work.
+#
+#=======================================================================
+#
+Box
+-20  -1  -1                                           nelx,nely,nelz for Box
+0  1  1.                                              x0,x1,gain
+0  0.1  1.                                             y0,y1,gain
+0  0.1  1.                                             z0,z1,gain
+v  ,O  ,SYM,SYM,E  ,E                                  bc's (3 chars each!)

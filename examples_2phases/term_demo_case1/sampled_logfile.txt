@@ -1,0 +1,42 @@
+ min/max:   0.0000       1.1420     -0.40020E-10  0.40023E-10 -0.19382E-09  0.29657E-09
+ elapsed time: 0.000387184s  (1.24276 GB/s)
+step=20000    t= 6.00000000e+00  dt=3.0e-04  CFL= 0.000
+step=20000    elapsedStep= 4.88e-03s  elapsedStepSum= 6.17376e+01s
+::
+
+>>> runtime statistics (step= 20000  totalElapsed= 84.3969s):
+name                    time          abs%  rel%  calls
+  solve                 6.17376e+01s  100.0      
+    min                 2.68215e-03s
+    max                 2.65981e-02s
+    flops/rank          2.72589e+10
+    checkpointing       1.43763e-03s   0.0        3
+    udfExecuteStep      4.22057e-02s   0.1        20000
+    makef               6.02674e+00s   9.8        20000
+    udfProperties       2.89909e-02s   0.0        20001
+    phase0Solve         8.22807e+00s  13.3        20000
+      rhs               2.02554e+00s   3.3  24.6  20000
+    phase1Solve         8.47045e+00s  13.7        20000
+      rhs               1.92469e+00s   3.1  22.7  20000
+      preconditioner    3.00322e-01s   0.5        45034
+    pressureSolve       2.40545e+01s  39.0        20000
+      rhs               2.68427e+00s   4.3  11.2  20000
+      preconditioner    1.28763e+01s  20.9  53.5  20003
+        pMG smoother    4.73350e+00s   7.7  36.8  40006
+        pMG smoother    4.51873e+00s   7.3  35.1  40006
+        coarse grid     1.20345e+00s   1.9   9.3  20003
+      initial guess     2.65451e+00s   4.3  11.0  20000
+
+occa max memory usage:     22751073 bytes
+  deviceMemoryPool:         3868672 bytes
+  mempool:                   245760 bytes
+
+
+timers for fieldExtract:
+name             time         calls     rel %    abs %
+> io             8.061e-03        62        100.0
+> setup          5.438e-03         1        100.0
+> interpolate    4.175e-03        62        100.0
+
+
+finished with exit code 0
