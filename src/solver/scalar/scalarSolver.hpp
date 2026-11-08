@@ -18,6 +18,13 @@ public:
   occa::memory o_Ue;
   occa::memory o_relUrst;
 
+  // Per-scalar override of the convecting velocity above (eq 90: a phase-tagged scalar like
+  // alpha_k should advect with THAT phase's own u_k, not the shared mixture velocity). Index
+  // by scalar number; an uninitialized/missing entry falls back to o_relUrst above (the
+  // existing default -- correct for an ordinary, non-phase-tagged scalar like temperature).
+  // Populated in nrs.cpp from each scalar's "phase=" par key, using fluid->o_relUrst_phases.
+  std::vector<occa::memory> o_relUrst_byScalar;
+
   bool dpdt = false;
   dfloat *dp0thdt = nullptr;
   dfloat *alpha0Ref = nullptr;
@@ -141,6 +148,11 @@ public:
   occa::memory o_U;
   occa::memory o_Ue;
   occa::memory o_relUrst;
+
+  // see scalarConfig_t::o_relUrst_byScalar -- resolved once at construction (falls back to
+  // o_relUrst above for any scalar without its own entry), read by makeAdvection/
+  // advectionSubcycling instead of the bare o_relUrst.
+  std::vector<occa::memory> o_relUrst_byScalar;
 
   occa::memory o_S;
   occa::memory o_Se;

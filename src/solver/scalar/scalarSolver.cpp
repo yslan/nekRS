@@ -63,7 +63,7 @@ void scalar_t::advectionSubcycling(int nEXT, double time, int is)
                         vCubatureOffset,
                         fieldOffsetSum,
                         (geom) ? geom->o_div : o_NULL,
-                        o_relUrst,
+                        o_relUrst_byScalar[is],
                         o_Si,
                         o_JwFi);
 
@@ -128,6 +128,16 @@ scalar_t::scalar_t(scalarConfig_t &cfg, const std::unique_ptr<geomSolver_t> &_ge
   if (!o_relUrst.isInitialized()) {
     const dlong Nstates = Nsubsteps ? std::max(o_coeffBDF.size(), o_coeffEXT.size()) : 1;
     o_relUrst = platform->device.malloc<dfloat>(Nstates * meshV->dim * vCubatureOffset);
+  }
+
+  // eq 90: a phase-tagged scalar (e.g. alpha_k) should advect with that phase's own u_k,
+  // not the shared mixture velocity -- see scalarConfig_t::o_relUrst_byScalar.
+  o_relUrst_byScalar.resize(NSfields);
+  for (int is = 0; is < NSfields; is++) {
+    o_relUrst_byScalar[is] = (is < static_cast<int>(cfg.o_relUrst_byScalar.size()) &&
+                              cfg.o_relUrst_byScalar[is].isInitialized())
+                                 ? cfg.o_relUrst_byScalar[is]
+                                 : o_relUrst;
   }
 
   dpdt = cfg.dpdt;
@@ -363,7 +373,7 @@ void scalar_t::makeAdvection(int is, double time, int tstep)
                    vFieldOffset,
                    vCubatureOffset,
                    o_S,
-                   o_relUrst,
+                   o_relUrst_byScalar[is],
                    o_rho,
                    o_ADV);
     } else {
@@ -377,7 +387,7 @@ void scalar_t::makeAdvection(int is, double time, int tstep)
                    o_fieldOffsetScan + is,
                    vFieldOffset,
                    o_S,
-                   o_relUrst,
+                   o_relUrst_byScalar[is],
                    o_rho,
                    o_ADV);
     }

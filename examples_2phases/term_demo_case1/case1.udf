@@ -1,0 +1,159 @@
+// term_demo_case1 -- Shaver et al., Trans. ANS 116, 2017 (trans_v116_n1_pp1251-1254.pdf),
+// First Test Case: "the mass fraction of the dispersed phase AND THE INITIAL VELOCITIES OF
+// BOTH PHASES are set to zero" (paper's own words) -- u_c = u_d = 0 at the inlet/IC, alpha_c
+// = 1, alpha_d = 0 exactly. The dispersed phase then accelerates under gravity+buoyancy to a
+// terminal velocity, decelerated by a CONSTANT drag coefficient C_D (eq 18); the continuous
+// phase stays at u_c = 0 exactly (trivial/undriven, zero net force since alpha_d == 0 kills
+// its drag-reaction term too). Closed-form reference: eq 21.
+//
+// IMPORTANT: since alpha_c==1/alpha_d==0 and u_c==0, the MIXTURE velocity u_bar = alpha_c*u_c
+// + alpha_d*u_d is IDENTICALLY ZERO everywhere -- and this solver's advection operator
+// linearizes every phase's advection using the MIXTURE's convecting velocity, not each
+// phase's own (see wk_claude/notes/05_scheme_vs_pnpn.md section 2.2), so phase1 sees ZERO
+// convection. There is therefore no spatial transport mechanism at all for u_d: eq 21's "z"
+// (the paper's own self-advected spatial coordinate, since their code DOES use each phase's
+// own velocity to advect) has no analog here -- our code's u_d(x) will come out spatially
+// FLAT (every point relaxes independently, in time, toward the same local force balance).
+// The physically-equivalent comparison is u_d(t) at a fixed point against eq 21 with z
+// relabeled as t (same ODE: the paper's own text frames this case as "a single spherical
+// bubble ... rising from rest in a quiescent continuous phase", i.e. exactly a time history
+// -- z and t are only interchangeable in the paper because ITS solver self-advects).
+// read_case1.py does this comparison; see Plan H notes for the fuller writeup.
+//
+// phase0 = continuous ("c"), phase1 = dispersed ("d") -- fluidSolver_t currently keys
+// o_solution/o_explicitTerms/isField() on "phase<k>" regardless of the [FLUID PHASE <name>]
+// section name (velocityName is always "phase"+phaseDigitStr(i)); using "phase0"/"phase1"
+// directly here avoids a silent mismatch against a cosmetic name.
+
+#include "fieldExtract.hpp"
+
+std::unique_ptr<fieldExtract> sampler;
+static int ioSample = 1; // steps between fieldExtract dumps; set in UDF_Setup from
+                          // NUMBER TIMESTEPS so every run writes ~NDUMPS .vts files
+                          // regardless of numSteps (was a fixed "every 20 steps" before,
+                          // which scaled linearly with numSteps and produced thousands of
+                          // tiny files for finer dt/longer runs -- e.g. a convergence sweep).
+
+// Table I (dimensionless), eq 18's constant C_D for the first test case.
+static constexpr dfloat RHO_C = 1.0;
+static constexpr dfloat RHO_D = 0.2;
+static constexpr dfloat D_D = 0.5;
+static constexpr dfloat GRAV = 0.9807;
+static constexpr dfloat CD0 = 0.4;
+
+#ifdef __okl__
+
+void udfDirichlet(bcData *bc)
+{
+  if (isField("phase0")) {
+    bc->uxFluid = 0.0;
+    bc->uyFluid = 0.0;
+    bc->uzFluid = 0.0;
+  } else if (isField("phase1")) {
+    bc->uxFluid = 0.0;
+    bc->uyFluid = 0.0;
+    bc->uzFluid = 0.0;
+  }
+}
+
+// eq 16/17: gravity ("-g") and the drag force F_d (eq 18) enter as accelerations, no
+// density factor -- matches this solver's o_EXT/o_JwF convention (confirmed density-free
+// during Plan F). The -(1/rho_k) dP/dz term is already supplied by the shared
+// mixture-pressure solve (eq 99/101); this kernel only adds what eq 16/17 put beyond that.
+// Runs entirely on-device (no host round-trip) -- every `@kernel void` defined here gets a
+// matching host-callable wrapper for free, so userf() below just calls this like a function.
+@kernel void dragGravityKernel(const dlong N,
+                                const dfloat RHO_C,
+                                const dfloat RHO_D,
+                                const dfloat D_D,
+                                const dfloat GRAV,
+                                const dfloat CD0,
+                                @ restrict const dfloat *uc,
+                                @ restrict const dfloat *ud,
+                                @ restrict dfloat *extC,
+                                @ restrict dfloat *extD)
+{
+  for (dlong n = 0; n < N; ++n; @tile(p_blockSize, @outer, @inner)) {
+    const dfloat rel = ud[n] - uc[n];
+    const dfloat Fd = -0.75 * (CD0 / D_D) * fabs(rel) * rel; // eq 18
+
+    extC[n] = -GRAV; // (alpha_d/alpha_c)*F_d reaction is exactly 0 here (alpha_d == 0)
+    extD[n] = -GRAV + (RHO_C / RHO_D) * Fd;
+  }
+}
+
+#endif
+
+void userf(double time)
+{
+  auto &fluid = nrs->fluid;
+  const auto N = fluid->mesh->Nlocal;
+  const auto fieldOffset = fluid->fieldOffset;
+
+  deviceMemory<dfloat> o_uc(fluid->o_solution("phase0").slice(0, fieldOffset));
+  deviceMemory<dfloat> o_ud(fluid->o_solution("phase1").slice(0, fieldOffset));
+  deviceMemory<dfloat> o_extC(fluid->o_explicitTerms("phase0").slice(0, fieldOffset));
+  deviceMemory<dfloat> o_extD(fluid->o_explicitTerms("phase1").slice(0, fieldOffset));
+
+  dragGravityKernel(N, RHO_C, RHO_D, D_D, GRAV, CD0, o_uc, o_ud, o_extC, o_extD);
+}
+
+void UDF_Setup()
+{
+  auto mesh = nrs->meshV;
+  auto &fluid = nrs->fluid;
+
+  nrs->userSource = &userf;
+
+  {
+    constexpr int NDUMPS = 60; // only the time-history convergence plot needs more than one
+                                // snapshot now (the paper-style plot just uses the final,
+                                // steady one) -- 60 is plenty dense for that curve's shape.
+    int numSteps = NDUMPS;
+    platform->options.getArgs("NUMBER TIMESTEPS", numSteps);
+    ioSample = (numSteps / NDUMPS > 1) ? numSteps / NDUMPS : 1;
+  }
+
+  // alpha_d == 0 exactly throughout -- no scalar transport needed for this case (see
+  // term_demo_case2 for the scalar-transported version, Plan G).
+  platform->linAlg->fill(mesh->Nlocal, 1.0, fluid->o_alpha_phases[0]);
+  platform->linAlg->fill(mesh->Nlocal, 0.0, fluid->o_alpha_phases[1]);
+
+  // IC: both phases at rest (paper's own stated IC for this test case).
+  {
+    auto o_cont = fluid->o_solution("phase0");
+    platform->linAlg->fill(o_cont.size(), 0.0, o_cont);
+
+    auto o_disp = fluid->o_solution("phase1");
+    platform->linAlg->fill(o_disp.size(), 0.0, o_disp);
+  }
+
+  // [fieldExtract] one line along the flow direction (x), sampled at the cross-section
+  // centerline, reproducing Fig. 1 of trans_v116_n1_pp1251-1254.pdf. Validation/plotting
+  // happens entirely in Python (read_case1.py) -- this UDF only samples and writes.
+  {
+    std::vector<int> boxDims = {81, 1, 1}; // npts in X, Y, Z (endpoints included)
+    std::vector<fieldExtract::field> fldList;
+    deviceMemory<dfloat> o_uc(fluid->o_solution("phase0").slice(0, fluid->fieldOffset));
+    deviceMemory<dfloat> o_ud(fluid->o_solution("phase1").slice(0, fluid->fieldOffset));
+    fldList.push_back({"uc", std::vector{o_uc}});
+    fldList.push_back({"ud", std::vector{o_ud}});
+
+    std::array<dfloat, 3> x0 = {0.0, 0.05, 0.05};
+    std::array<dfloat, 3> x1 = {1.0, 0.05, 0.05};
+    sampler = std::make_unique<fieldExtract>(mesh, boxDims, fldList, "case1", x0, x1);
+  }
+}
+
+void UDF_ExecuteStep(double time, int tstep)
+{
+  // [fieldExtract] sample periodically (~40 dumps per run, see ioSample in UDF_Setup); the
+  // final dump (lastStep) is the steady profile compared against eq 21.
+  if (tstep % ioSample == 0 || nrs->lastStep) {
+    sampler->process(time, tstep);
+  }
+  if (nrs->lastStep) {
+    sampler.reset(); // unique_ptr::reset -- frees the sampler (and its findpts comm)
+                      // before MPI_Finalize, not a method on fieldExtract itself
+  }
+}

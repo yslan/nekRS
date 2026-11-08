@@ -1,0 +1,41 @@
+userSections = CASEDATA
+
+[GENERAL]
+# dt is set by the dispersed phase's drag stiffness, not the advective CFL: the drag term
+# enters phase1's momentum equation scaled by rho_c/rho_d = 5x (eq 17) and is treated
+# EXPLICITLY (userf/userSource, no implicit linearization) -- as u_d approaches terminal
+# velocity (~1.14) the quadratic drag term outgrows what dt=3e-3 could handle explicitly
+# (observed: CFL pristine at 0.936 through step ~32, exponential blowup by step ~46).
+# 3e-4 (10x smaller, numSteps scaled up 10x for the same total simulated time) is stable.
+polynomialOrder = 7
+numSteps = 20000
+dt = 3e-4
+timeStepper = tombo2
+checkpointInterval = 20000
+
+[FLUID PRESSURE]
+residualTol = 1e-06
+
+[FLUID VELOCITY]
+# bID1 = inlet (x=0), bID2 = outlet (x=1), bID3 = symmetry (y=0/0.1); boundaryID is
+# assigned from cbc in case1.usr's usrdat2 -- genbox's "E" alone does not become a
+# real boundary ID. See case1.box/case1.usr.
+boundaryTypeMap = udfDirichlet, zeroNeumann, zeroDirichletY/zeroNeumann
+preconditioner = JACOBI
+viscosity = 1e-4
+residualTol = 1e-08
+phases = phase0, phase1
+
+# phase0 = continuous (Shaver et al. "c"): rho_c = 1.0, u_c = 1 at inlet, decoupled
+# (zero dispersed-phase mass fraction -> zero drag reaction).
+[FLUID PHASE phase0]
+rho = 1.0
+
+# phase1 = dispersed (Shaver et al. "d"): rho_d = 0.2, D_d = 0.5, zero at inlet,
+# accelerates under gravity+buoyancy to terminal velocity via constant-C_D drag
+# (userSource in case1.udf -- see Table I / eq 18 / eq 21 of
+# trans_v116_n1_pp1251-1254.pdf).
+[FLUID PHASE phase1]
+rho = 0.2
+
+[CASEDATA]
