@@ -347,9 +347,28 @@ void nrs_t::init()
         cfg.o_relUrst = fluid->o_relUrst;
       }
       cfg.mesh.resize(Nscalar);
+      cfg.o_relUrst_byScalar.resize(Nscalar);
       for (int is = 0; is < Nscalar; is++) {
-        cfg.mesh[is] =
-            (platform->options.compareArgs("SCALAR" + scalarDigitStr(is) + " MESH", "SOLID")) ? meshT : meshV;
+        const std::string sid = scalarDigitStr(is);
+        cfg.mesh[is] = (platform->options.compareArgs("SCALAR" + sid + " MESH", "SOLID")) ? meshT : meshV;
+
+        // eq 90: a scalar tagged "phase = <name>" (Plan G's alpha transport) should advect
+        // with THAT phase's own velocity, not the shared mixture one -- look up the phase
+        // by name (the tag, e.g. "PHASE1") and use fluid's own per-phase convecting
+        // velocity (fluidSolver_t::computeUrstPhases()). Leaving cfg.o_relUrst_byScalar[is]
+        // uninitialized (untagged scalar, or no phases declared) falls back to the shared
+        // mixture o_relUrst, same as before this fix.
+        if (fluid && fluid->Nphase > 1) {
+          const auto taggedPhase = platform->options.getArgs("SCALAR" + sid + " ALPHA PHASE");
+          if (!taggedPhase.empty()) {
+            for (int k = 0; k < fluid->Nphase; k++) {
+              if (upperCase(fluid->velocityName[k]) == taggedPhase) {
+                cfg.o_relUrst_byScalar[is] = fluid->o_relUrst_phases[k];
+                break;
+              }
+            }
+          }
+        }
       }
       cfg.meshV = meshV;
       cfg.dp0thdt = &dp0thdt;
@@ -1762,6 +1781,14 @@ void nrs_t::initInnerStep(double time, dfloat _dt, int _tstep)
   }
 
   computeUrst();
+
+  if (fluid) {
+    // eq 92/97: each phase's own advection needs (u_k.grad)u_k, not (u_bar.grad)u_k --
+    // computeUrst() above only updates the mixture-level o_relUrst (also used by any scalar
+    // not tagged with a phase, e.g. a shared temperature field). No-op for the classic case
+    // (o_relUrst_phases[0] already aliases the mixture o_relUrst just updated above).
+    fluid->computeUrstPhases();
+  }
 
   if (geom && advectionSubcycingSteps) { // used in makeAdvection
     geom->computeDiv();

@@ -233,7 +233,14 @@ public:
   // 3 for separate x/y/z). Populated by solveVelocity(); read by nrs_t::printStepInfo.
   std::vector<std::vector<velocityConvergence_t>> velocityConvergence;
 
-  occa::memory o_relUrst; // TODO no 2p
+  occa::memory o_relUrst; // mixture-level (classic case; also used by any scalar NOT tagged
+                           // with a phase= key, e.g. a shared temperature field)
+
+  // phase k's own convecting velocity (eq 92/97: (u_k.grad)u_k, not (u_bar.grad)u_k) --
+  // computed by computeUrstPhases(). Classic case: o_relUrst_phases[0] aliases o_relUrst
+  // (same pattern as o_U_phases etc.).
+  std::vector<occa::memory> o_relUrst_phases;
+  void computeUrstPhases();
 
   void finalize() override
   {

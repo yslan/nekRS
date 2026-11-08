@@ -140,6 +140,15 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
   {
     const dlong Nstates = Nsubsteps ? std::max(o_coeffBDF.size(), o_coeffEXT.size()) : 1;
     o_relUrst = platform->device.malloc<dfloat>(Nstates * mesh->dim * cubatureOffset);
+
+    o_relUrst_phases.resize(Nphase);
+    if (nPhasesDeclared > 0) {
+      for (int i = 0; i < Nphase; i++) {
+        o_relUrst_phases[i] = platform->device.malloc<dfloat>(Nstates * mesh->dim * cubatureOffset);
+      }
+    } else {
+      o_relUrst_phases = {o_relUrst};
+    }
   }
 
   o_prop = [&]() {
@@ -623,20 +632,26 @@ void fluidSolver_t::solveVelocity(double time, int stage, int phase)
     return o_gradP;
   }();
 
-  // TODO (eq 97): o_JwF is still the mixture-level forcing (time-derivative + advection of
-  // the MIXTURE velocity, not phase k's own) -- see makeForcing/makeAdvection. Scaling it by
-  // o_rho_k here is a bounded approximation, not the real per-phase forcing. Also missing:
-  // the interfacial/phase-change exchange term (u_ki-u_k)*Gamma_k/alpha_k + M_k/alpha_k
-  // (eq 94/97) -- not modeled anywhere, assumed zero.
+  // BUG FIX (eq 97), found+fixed this session: this used to pass the bare, MIXTURE-combined
+  // o_JwF (eq 99's alpha-weighted sum, meant for the PRESSURE equation) into every phase's
+  // own velocity RHS, instead of that phase's own o_JwF_phases[phase] (eq 97's rho_k*(BDF_k -
+  // EXT_k), phase k's own time-derivative + advection history). For any case with alpha_k==0
+  // for some phase (e.g. term_demo_case1's dispersed phase), the mixture sum's alpha_k
+  // weighting zeroed that phase's own forcing out of its OWN velocity equation entirely,
+  // leaving only the shared pressure gradient's effect -- explained the "jumps once then
+  // freezes, never accumulates" symptom exactly (confirmed via DBGCORE printf cross-checked
+  // against a hand-derived expected RHS). Still missing (unrelated, not fixed here): the
+  // interfacial/phase-change exchange term (u_ki-u_k)*Gamma_k/alpha_k + M_k/alpha_k (eq
+  // 94/97) -- not modeled anywhere, assumed zero (left to the UDF's own userSource).
   const auto o_rhs = [&]() {
     auto o_rhs = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
 
-    // o_rho_k * o_JwF + o_gradP + o_gradMueDiv
+    // o_rho_k * o_JwF_phases[phase] + o_gradP + o_gradMueDiv
     launchKernel("fluidSolver_t::velocityRhsHex3D",
                  mesh->Nlocal,
                  fieldOffset,
                  o_rho_k,
-                 o_JwF,
+                 o_JwF_phases[phase],
                  o_gradMueDiv,
                  o_gradP,
                  o_rhs);
@@ -771,15 +786,32 @@ void fluidSolver_t::setupEllipticSolver()
     // boundaryTypeMap override would currently be silently ignored, not actually produce
     // mixed BC. Refuse rather than let a case believe per-phase BC is in effect: there isn't
     // enough math support for mixed BC yet (Plan C left the option open, not implemented).
-    const auto mixtureBcMap = platform->options.getArgs(upperCase(mixtureVelocityName) + " BOUNDARY TYPE MAP");
-    for (int i = 0; i < Nphase; i++) {
+    //
+    // Compare phases against EACH OTHER (not against the mixture's own option): (a)
+    // "FLUID VELOCITY BOUNDARY TYPE MAP" is gone by this point anyway -- nrs_t::bdry::setup()
+    // (called long before fluidSolver_t even exists) removes every option whose key contains
+    // "BOUNDARY TYPE MAP" once consumed, so there is nothing reliable left to compare against
+    // on the mixture side; (b) a user could in principle set boundaryTypeMap only on each
+    // [FLUID PHASE] section with nothing on [FLUID VELOCITY] at all -- phase-vs-phase is the
+    // right invariant either way, not phase-vs-mixture. (Self-caught: the previous version
+    // of this check compared against the mixture's option directly and failed unconditionally
+    // for every phased case, since that option was always already empty by this point.)
+    const auto referenceBcMap = platform->options.getArgs(upperCase(velocityName[0]) + " BOUNDARY TYPE MAP");
+    nekrsCheck(referenceBcMap.empty(),
+               platform->comm.mpiComm(),
+               EXIT_FAILURE,
+               "2-phase: %s boundaryTypeMap is not set (neither on the phase nor inherited "
+               "from FLUID VELOCITY)\n",
+               velocityName[0].c_str());
+    for (int i = 1; i < Nphase; i++) {
       const auto phaseBcMap = platform->options.getArgs(upperCase(velocityName[i]) + " BOUNDARY TYPE MAP");
-      nekrsCheck(phaseBcMap != mixtureBcMap,
+      nekrsCheck(phaseBcMap.empty() || phaseBcMap != referenceBcMap,
                  platform->comm.mpiComm(),
                  EXIT_FAILURE,
-                 "2-phase: %s boundaryTypeMap differs from the mixture's -- mixed BC per "
+                 "2-phase: %s boundaryTypeMap differs from %s's (or is unset) -- mixed BC per "
                  "phase is not supported yet (shared o_EToB/elliptic EToB)\n",
-                 velocityName[i].c_str());
+                 velocityName[i].c_str(),
+                 velocityName[0].c_str());
     }
   }
 
@@ -1044,8 +1076,66 @@ void fluidSolver_t::makeForcing(int phase)
   }
 }
 
-// o_Uconv (o_relUrst, the ALE/mesh-relative convecting velocity) stays mixture-level/shared
-// across phases -- the mesh's own motion doesn't differ per phase, so this isn't split.
+// eq 92/97: BUG FIX, found+fixed this session (same root cause/category as the o_JwF fix):
+// every phase's advection used to convect with the shared MIXTURE o_relUrst (see the old
+// comment this replaced -- "the mesh's own motion doesn't differ per phase, so this isn't
+// split" conflated the mesh-velocity part of relUrst, which genuinely doesn't vary per
+// phase, with the FLUID-velocity part, which does and was wrongly left shared). Computes
+// each phase's own convecting velocity from o_U_phases[i] instead of the bare mixture o_U.
+// No-op for the classic case (Nphase==1): o_relUrst_phases[0] already aliases the mixture
+// o_relUrst, which nrs_t::computeUrst() already updates.
+void fluidSolver_t::computeUrstPhases()
+{
+  if (o_alpha_phases.empty()) {
+    return;
+  }
+
+  for (int i = 0; i < Nphase; i++) {
+    auto &o_relUrstPhase = o_relUrst_phases[i];
+
+    if (Nsubsteps) {
+      for (int s = o_coeffEXT.size(); s > 1; s--) {
+        const auto lagOffset = mesh->dim * cubatureOffset;
+        o_relUrstPhase.copyFrom(o_relUrstPhase, lagOffset, (s - 1) * lagOffset, (s - 2) * lagOffset);
+      }
+    }
+
+    const auto relative = static_cast<int>(static_cast<bool>(geom) && Nsubsteps);
+
+    double flopCount = 0.0;
+    if (platform->options.compareArgs("ADVECTION TYPE", "CUBATURE")) {
+      launchKernel("nrs-UrstCubatureHex3D",
+                   mesh->Nelements,
+                   relative,
+                   mesh->o_cubvgeo,
+                   mesh->o_cubInterpT,
+                   fieldOffset,
+                   (geom) ? geom->fieldOffset : 0,
+                   cubatureOffset,
+                   o_U_phases[i],
+                   (geom) ? geom->o_U : o_NULL,
+                   o_relUrstPhase);
+      flopCount += 6 * mesh->Np * mesh->cubNq;
+      flopCount += 6 * mesh->Nq * mesh->Nq * mesh->cubNq * mesh->cubNq;
+      flopCount += 6 * mesh->Nq * mesh->cubNp;
+      flopCount += 24 * mesh->cubNp;
+      flopCount *= mesh->Nelements;
+    } else {
+      launchKernel("nrs-UrstHex3D",
+                   mesh->Nelements,
+                   relative,
+                   mesh->o_vgeo,
+                   fieldOffset,
+                   (geom) ? geom->fieldOffset : 0,
+                   o_U_phases[i],
+                   (geom) ? geom->o_U : o_NULL,
+                   o_relUrstPhase);
+      flopCount += 24 * static_cast<double>(mesh->Nlocal);
+    }
+    platform->flopCounter->add(velocityName[i] + " Urst", flopCount);
+  }
+}
+
 void fluidSolver_t::makeAdvection(double time, int tstep, int phase)
 {
   if (userAdvectionTerm) {
@@ -1056,7 +1146,7 @@ void fluidSolver_t::makeAdvection(double time, int tstep, int phase)
   if (Nsubsteps) {
     advectionSubcycling(std::min(tstep, static_cast<int>(o_coeffEXT.size())), time, phase);
   } else {
-    auto &o_Uconv = o_relUrst;
+    auto &o_Uconv = o_relUrst_phases[phase];
     auto &o_Uphase = o_U_phases[phase];
     auto &o_ADVphase = o_ADV_phases[phase];
 
@@ -1271,7 +1361,7 @@ void fluidSolver_t::advectionSubcycling(int nEXT, double time, int phase)
                         cubatureOffset,
                         fieldOffsetSum,
                         (geom) ? geom->o_div : o_NULL,
-                        o_relUrst,
+                        o_relUrst_phases[phase],
                         o_Uphase,
                         o_JwFphase);
 
