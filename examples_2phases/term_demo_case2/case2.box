@@ -1,0 +1,41 @@
+case2.rea
+-3                      spatial dimension  ( < 0 --> generate .rea/.re2 pair)
+1                       number of fields
+#=======================================================================
+#
+#  term_demo_case2 -- Shaver et al. (Trans. ANS 116, 2017) second test case.
+#  "1D via 2D rectangular mesh": inlet/outlet normal to the flow (x), SYM on
+#  the two long sides (y), single periodic layer (z) to keep it a thin 3D
+#  box standing in for a 2D case. Nondimensional domain length = 1 (paper's
+#  z-coordinate maps to this mesh's x). 40 streamwise elements (vs case1's
+#  20) since alpha/velocity genuinely evolve from inlet to fully-developed
+#  state here and need resolving.
+#
+#  Letter codes alone do NOT by themselves become real boundary IDs for
+#  nekRS's boundaryTypeMap dispatch -- case2.usr's usrdat2() assigns
+#  boundaryID explicitly from cbc (same pattern as examples/gabls1,
+#  examples/lowMach). West/east use "v"/"O" (unambiguous: these letters are
+#  NEVER written by genbox for genuine internal element-element connections,
+#  unlike "E" -- see below). South/north use "SYM". Bottom/top are coded "E"
+#  and overridden to 'P' in usrdat2 for the single periodic z layer; "E" is
+#  safe there ONLY because nelz=1 (no other element in z to be ambiguous
+#  with -- every element's bottom/top face is already a true domain
+#  boundary). IMPORTANT, found the hard way: do NOT use "E" for west/east
+#  here (as this repo's term_demo_case1/case1.usr currently does) -- with
+#  nelx=40 (>1), "E" is the SAME code genbox writes for the genuine internal
+#  connections between consecutive x-elements, so "ifc==1 .and. cbc=='E  '"
+#  matches EVERY element's west face, not just the true boundary one, and
+#  boundaryID ends up never set to 1 anywhere (confirmed by re-running
+#  case1_v2 in this same session: identical "boundary ID needs to be
+#  one-based index but min(ID) is 2!" abort). "v"/"O"/"SYM" are written by
+#  genbox ONLY where the .box file's bc line puts them, so matching on cbc
+#  value alone (no face-index/position guard needed) is unambiguous.
+#
+#=======================================================================
+#
+Box
+-40  -1  -1                                           nelx,nely,nelz for Box
+0  1  1.                                              x0,x1,gain
+0  0.1  1.                                             y0,y1,gain
+0  0.1  1.                                             z0,z1,gain
+v  ,O  ,SYM,SYM,E  ,E                                  bc's (3 chars each!)

@@ -1,0 +1,91 @@
+C
+C  USER SPECIFIED ROUTINES:
+C     bID1 = inlet (x=0, box face "west", cbc="v"), bID2 = outlet (x=1,
+C     "east", cbc="O"), bID3 = symmetry (y=0/y=0.1, "south"/"north",
+C     cbc="SYM"). z is a single periodic layer standing in for a true 2D
+C     case (bottom/top, coded "E" in case2.box and overridden to 'P' here --
+C     safe only because nelz=1, so there is no ambiguity with genuine
+C     internal element-element "E" connections). genbox's own letter codes
+C     alone do not become real boundaryIDs for the modern [FLUID VELOCITY]
+C     boundaryTypeMap dispatch; boundaryID must be assigned explicitly here,
+C     matched on cbc VALUE (not face index) -- "v"/"O"/"SYM" are written by
+C     genbox only where the .box bc line puts them, so this is unambiguous
+C     (unlike "E", which is reused for every genuine internal x-connection
+C     when nelx>1 -- see the long comment in case2.box for why west/east
+C     must NOT be coded "E" here).
+C
+c-----------------------------------------------------------------------
+      subroutine useric (ix,iy,iz,ieg)
+      include 'SIZE'
+      include 'NEKUSE'
+
+      ux = 0.0
+      uy = 0.0
+      uz = 0.0
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine userchk
+      include 'SIZE'
+      include 'TOTAL'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat0
+      include 'SIZE'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat   ! This routine to modify element vertices
+      include 'SIZE'      ! _before_ mesh is generated, which
+      include 'TOTAL'     ! guarantees GLL mapping of mesh.
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat2()  ! assign boundaryID from cbc -- see case2.box
+      include 'SIZE'
+      include 'TOTAL'
+
+      integer iel, ifc
+
+      do iel=1,nelt
+         cbc(5,iel,1) = 'P  '
+         cbc(6,iel,1) = 'P  '
+         do ifc=1,2*ndim
+            if (cbc(ifc,iel,1).eq.'v  ') boundaryID(ifc,iel) = 1
+            if (cbc(ifc,iel,1).eq.'O  ') boundaryID(ifc,iel) = 2
+            if (cbc(ifc,iel,1).eq.'SYM') boundaryID(ifc,iel) = 3
+         enddo
+      enddo
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrdat3
+      include 'SIZE'
+      include 'TOTAL'
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine usrsetvert(glo_num,nel,nx,ny,nz) ! to modify glo_num
+      integer*8 glo_num(1)
+
+      ! kludge for periodic bc in z (single-element-thick layer), same as
+      ! examples/{channel,shlChannel} and term_demo_case1/case1.usr
+      nxy  = nx*ny
+      nxyz = nx*ny*nz
+      do iel = 1,nel
+         ioff = nxyz*(iel-1)
+         do ixy = 1,nxy
+            glo_num(ioff + nxy*(nz-1) + ixy) = glo_num(ioff + ixy)
+         enddo
+      enddo
+
+      return
+      end
+c-----------------------------------------------------------------------

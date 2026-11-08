@@ -1,0 +1,92 @@
+userSections = CASEDATA
+
+[GENERAL]
+# 40 streamwise elements (vs case1's 20) roughly halves the element spacing, so dt had to
+# shrink too -- case1's dt=3e-3 blew up here (actual numerical divergence, not just a large
+# reported CFL number: resNorm/divUErr grew unboundedly within ~50 steps). Verified stable
+# (CFL flat at 0.312 for 500 steps) at dt=5e-4; numSteps chosen for total simulated time
+# T=8 (comparable margin to case1's T=6) to reach the fully-developed state.
+polynomialOrder = 7
+numSteps = 32000
+dt = 2.5e-4
+timeStepper = tombo2
+checkpointInterval = 16000
+scalars = alphad
+
+[FLUID PRESSURE]
+residualTol = 1e-06
+
+[FLUID VELOCITY]
+# bID1 = inlet (x=0), bID2 = outlet (x=1), bID3 = symmetry (y=0/0.1); boundaryID is
+# assigned from cbc in case2.usr's usrdat2 -- genbox's "E"/"SYM" letters alone do not
+# become real boundary IDs. See case2.box/case2.usr.
+boundaryTypeMap = udfDirichlet, zeroNeumann, zeroDirichletY/zeroNeumann
+preconditioner = JACOBI
+viscosity = 1e-4
+residualTol = 1e-08
+phases = phase0, phase1
+
+# phase0 = continuous (Shaver et al. "c"): rho_c = 1.0, u_c = 1 and alpha_c = 0.7917 at
+# inlet (Table II), accelerates/decelerates toward the fully-developed state (Table III)
+# under gravity + variable-C_D drag reaction (userSource in case2.udf -- see Table I/II/III,
+# eq 14-19 of trans_v116_n1_pp1251-1254.pdf).
+[FLUID PHASE phase0]
+# Explicit (not just inherited) -- must match [FLUID VELOCITY]'s boundaryTypeMap exactly;
+# fluidSolver_t::setupEllipticSolver() hard-refuses if a phase's own BOUNDARY TYPE MAP
+# option differs from the mixture's (mixed BC per phase isn't supported). The INI-level
+# phase-inherits-from-mixture merge (parseFluidPhaseSections) did not reliably propagate
+# this for a 3-entry map in testing here, so it's spelled out explicitly instead.
+boundaryTypeMap = udfDirichlet, zeroNeumann, zeroDirichletY/zeroNeumann
+rho = 1.0
+
+# phase1 = dispersed (Shaver et al. "d"): rho_d = 0.2, D_d = 0.5, u_d = 1 and
+# alpha_d = 0.2083 at inlet (Table II). Unlike case1, alpha_d genuinely evolves here --
+# transported via the alphad scalar below (Plan G mechanism).
+[FLUID PHASE phase1]
+# Explicit, must match [FLUID VELOCITY] exactly -- see phase0's comment above.
+boundaryTypeMap = udfDirichlet, zeroNeumann, zeroDirichletY/zeroNeumann
+rho = 0.2
+
+# Plan G alpha-transport scalar for phase1 (dispersed). "phase = phase1" here is consumed by
+# parseScalar.hpp into "SCALAR<n> ALPHA PHASE", which nrs.cpp now (this session's fix) uses
+# to pick THIS phase's own convecting velocity (fluid->o_relUrst_phases) for this scalar's
+# advection -- previously that option was set but nothing downstream read it, so it had no
+# effect (the scalar silently advected with the shared mixture velocity instead); fixed as
+# part of the same o_relUrst_phases/o_relUrst_byScalar fix as the momentum equations. The
+# push of this scalar's solution into fluid->o_alpha_phases[1] is still manual, via
+# nrs->preFluid in case2.udf (setAlphaPhase/deriveLastAlphaPhase).
+# diffusionCoeff is a small artificial numerical diffusivity (same order as the momentum
+# equations' viscosity = 1e-4 regularizer below), not a physical input -- the paper's alpha
+# transport (eq 15) has no diffusion term either.
+# eq 90 ALSO needs a dilation term, alpha_d*div(u_d), that a plain advection-diffusion
+# scalar equation cannot provide (it's exactly zero for a uniform field at any
+# diffusionCoeff, so NOT what was freezing alpha_d here). Added in case2.udf via
+# scalar_t::userImplicitLinearTerm (phase1's own velocity divergence, opSEM::
+# strongDivergence, as an IMPLICIT reaction coefficient -- linear in alpha_d, so it moves to
+# the LHS; an earlier explicit-source attempt was dt-independently unstable, see case2.udf's
+# header comment). Not something fixed in scalarSolver_t itself.
+[SCALAR alphad]
+phase = phase1
+diffusionCoeff = 1e-4
+# Both the explicit and implicit forms of the eq 90 dilation term above went dt-independently
+# unstable at the same physical time (t~0.22) -- consistent with div(u_d) itself growing
+# large enough (as the drag-driven u_c/u_d split develops from the uniform IC) to either
+# have no explicit limiter or break the implicit solve's positive-definiteness. AVM
+# (modal-decay artificial viscosity, scalarSolver.cpp's applyAVM(), already called
+# automatically from nrs.cpp -- no UDF change needed) is NekRS's existing shock-capturing
+# tool for exactly this: a developing steep front in a spectrally-discretized scalar.
+# polynomialOrder=7 here satisfies AVM's own N>=5 requirement. noiseThreshold/scalingCoeff
+# are a first guess (alpha is O(0.1-1), not independently tuned yet).
+# DISABLED for now (testing the [0,1] clamp in case2.udf's myPreFluid in isolation --
+# re-enable if the clamp alone isn't enough): regularization = avm+scalingCoeff=0.5+noiseThreshold=1e-8
+# Same 3 boundary IDs as [FLUID VELOCITY] (shared mesh boundaryID array, assigned in
+# case2.usr): inlet Dirichlet, outlet zero-flux, symmetry zero-flux (no lateral alpha
+# gradient expected across the SYM sides).
+boundaryTypeMap = udfDirichlet, zeroNeumann, zeroNeumann
+residualTol = 1e-08
+
+[CASEDATA]
+# fieldExtract sampling cadence (in steps) -- read in case2.udf via platform->par->extract
+# and used as the "tstep % ioSample == 0" guard in UDF_ExecuteStep. numSteps=16000 /
+# ioSample=800 gives exactly 20 .vts dumps total (cap: no more than 20 per case).
+ioSample = 800
