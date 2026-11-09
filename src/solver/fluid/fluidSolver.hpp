@@ -41,7 +41,11 @@ private:
   // both the BDF-of-o_U and EXT-of-o_ADV_phases[k] combinations, which need the SAME
   // "weighted sum over lag levels" arithmetic sumMakef.okl already does internally but never
   // exposes on its own.
-  void combineLagLevels(const occa::memory &o_coeff, const occa::memory &o_field, int nLevels, occa::memory &o_out);
+  void combineLagLevels(const occa::memory &o_coeff,
+                         const occa::memory &o_field,
+                         int nLevels,
+                         occa::memory &o_out,
+                         bool applyJacobianWeight = true);
 
   occa::memory o_zeroNormalMask;
   occa::memory o_filterRT;
@@ -234,6 +238,16 @@ public:
 
   std::function<occa::memory(double)> userImplicitLinearTerm = nullptr;
   std::function<occa::memory(double, int)> userAdvectionTerm = nullptr;
+
+  // (v2, 105)'s RED term -- the per-phase diffusion-velocity viscous stress,
+  // -div(sum_k alpha_k*div(nu_k*(grad(Ubar_k)+grad(Ubar_k)^T))), Ubar_k = u_k - u_bar (eq
+  // 86). Not implemented anywhere by default (same documented gap as always); a case's UDF
+  // may set this to inject it into solvePressure()'s RHS. Returns the RAW (positive-sign)
+  // div(sum_k alpha_k*div(nu_k*grad(Ubar_k))) -- solvePressure() applies the PDF's own
+  // leading minus sign itself (via pressureAddQtl's lambda), matching the convention Plan K
+  // Part A already uses for the lagged-Q_bar term, so this hook's return value should NOT
+  // be pre-negated by the UDF.
+  std::function<occa::memory(double)> userRedTerm = nullptr;
 
   occa::memory o_U;   // mixture
   occa::memory o_Ue;  // mixture

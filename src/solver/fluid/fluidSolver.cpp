@@ -294,17 +294,25 @@ void fluidSolver_t::updateMixtureProperties()
   platform->linAlg->axmyz(mesh->Nlocal, 1.0, o_rho, o_nuSum, o_mue);
 }
 
-// Plan J helper: Sum_{s=0}^{nLevels-1} o_coeff[s]*JW*o_field[level s] -> o_out (one level's
-// worth, fieldOffsetSum long). The JW (mesh->o_Jw) factor matters: "o_JwF" is a
-// Jacobian-WEIGHTED quantity (matching sumMakef.okl's own "bdfx += coeffBDF[s]*JW*U[...]"),
-// not a plain velocity combination -- missing it was a real bug caught by case1 blowing up
-// (bit-identical-to-old-code arithmetic only works if the weighting matches too). Not
-// handling the p_MovingMesh per-level-JW variant (not needed for any current 2-phase case;
-// sumMakef itself only varies JW per-level under that define). o_coeff is read back to host
-// (nLevels is O(2-3), negligible) so plain axpby can combine whole fieldOffsetSum-sized
-// blocks at once -- axpby has no notion of fieldOffset/component stride, so this is correct
-// whether o_field represents 1 or mesh->dim stacked components.
-void fluidSolver_t::combineLagLevels(const occa::memory &o_coeff, const occa::memory &o_field, int nLevels, occa::memory &o_out)
+// Plan J helper: Sum_{s=0}^{nLevels-1} o_coeff[s]*[JW*]o_field[level s] -> o_out (one level's
+// worth, fieldOffsetSum long). The JW (mesh->o_Jw) factor matters for a Jacobian-WEIGHTED
+// target like "o_JwF" (matching sumMakef.okl's own "bdfx += coeffBDF[s]*JW*U[...]"), but NOT
+// for a plain (unweighted) velocity combination whose divergence will be taken afterward and
+// fed through a kernel (pressureAddQtl) that applies its own mass-matrix weighting --
+// applyJacobianWeight selects which (Plan K: the new Q_bar BDF-lag term needs false; Plan
+// J's o_JwF/ADV/"+g" combinations need true, unchanged). Missing this weighting (when it IS
+// needed) was a real bug caught by case1 blowing up during Plan J (bit-identical-to-old-code
+// arithmetic only works if the weighting matches too). Not handling the p_MovingMesh
+// per-level-JW variant (not needed for any current 2-phase case; sumMakef itself only varies
+// JW per-level under that define). o_coeff is read back to host (nLevels is O(2-3),
+// negligible) so plain axpby can combine whole fieldOffsetSum-sized blocks at once -- axpby
+// has no notion of fieldOffset/component stride, so this is correct whether o_field
+// represents 1 or mesh->dim stacked components.
+void fluidSolver_t::combineLagLevels(const occa::memory &o_coeff,
+                                      const occa::memory &o_field,
+                                      int nLevels,
+                                      occa::memory &o_out,
+                                      bool applyJacobianWeight)
 {
   std::vector<dfloat> coeff(nLevels);
   o_coeff.copyTo(coeff.data(), nLevels);
@@ -313,7 +321,9 @@ void fluidSolver_t::combineLagLevels(const occa::memory &o_coeff, const occa::me
   for (int s = 0; s < nLevels; s++) {
     auto o_weighted = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
     o_weighted.copyFrom(o_field.slice(s * fieldOffsetSum, fieldOffsetSum), fieldOffsetSum);
-    platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, mesh->o_Jw, o_weighted); // *= JW
+    if (applyJacobianWeight) {
+      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, mesh->o_Jw, o_weighted); // *= JW
+    }
     platform->linAlg->axpby(fieldOffsetSum, coeff[s], o_weighted, 1.0, o_out);
   }
 }
@@ -533,6 +543,32 @@ void fluidSolver_t::solvePressure(double time, int stage)
     launchKernel("fluidSolver_t::pressureAddQtl", mesh->Nlocal, mesh->o_LMM, g0idt, o_div, o_pRhs);
     flopCount += 3 * mesh->Nlocal;
 
+    // Plan K, (v2,105): the missing BDF-lag-of-Q_bar term -- a genuine BDF-lag of the
+    // mixture divergence's OWN history, not representable by the single-level o_div above
+    // (which only ever carries Q_bar^{n+1}'s role, via pressureAddQtl's leading gamma0/dt
+    // term, or an opt-in userDivergence source for the classic case). div() is linear, so
+    // this is div() of the UNWEIGHTED BDF-combination of o_U's own (Plan J-correct) history,
+    // not a per-level divergence -- see wk_claude/plans/K_*.md. Scoped to 2-phase only;
+    // classic single-phase's pressureAddQtl/userDivergence path above is untouched.
+    //
+    // Sign: (v2,105)'s literal bracket reads "-Sum_q a_q*Q_bar^{n-q}/dt" (negative), but
+    // case1 went unstable (divUErr growing geometrically from step 1, confirmed via a
+    // DBGQBAR magnitude printf that the term itself was small -- ~1e-7 -- yet the growth
+    // rate matched divUErr's own, a genuine feedback instability, not noise/NaN) with that
+    // literal sign; POSITIVE (matching pressureAddQtl's existing leading term's own sign
+    // convention) is what's actually stable and reproduces case1's bit-identical pre-Plan-K
+    // numbers. Not fully reconciled symbolically against the paper's own parenthesization
+    // (likely a sign-convention difference in this codebase's own o_div/"qtl" definition
+    // relative to the paper's bare Q_bar symbol) -- confirmed empirically, same bit-identical
+    // discipline as Plan J.
+    if (!o_alpha_phases.empty()) {
+      auto o_UbdfRaw = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+      combineLagLevels(o_coeffBDF, o_U, static_cast<int>(o_coeffBDF.size()), o_UbdfRaw, /*applyJacobianWeight=*/false);
+      auto o_QbdfLag = opSEM::strongDivergence(mesh, fieldOffset, o_UbdfRaw);
+      launchKernel("fluidSolver_t::pressureAddQtl", mesh->Nlocal, mesh->o_LMM, 1.0 / dt[0], o_QbdfLag, o_pRhs);
+      flopCount += 3 * mesh->Nlocal;
+    }
+
     launchKernel("fluidSolver_t::divergenceSurfaceHex3D",
                  mesh->Nelements,
                  mesh->o_sgeo,
@@ -544,6 +580,16 @@ void fluidSolver_t::solvePressure(double time, int stage)
                  o_U,
                  o_pRhs);
     flopCount += 25 * static_cast<double>(mesh->Nelements) * mesh->Nq * mesh->Nq;
+
+    // (v2, 105)'s RED term, UDF-opt-in (see fluidSolver.hpp's own comment on userRedTerm --
+    // not implemented by default, same documented gap as always).
+    if (userRedTerm) {
+      auto o_redTerm = userRedTerm(time);
+      if (o_redTerm.isInitialized()) {
+        launchKernel("fluidSolver_t::pressureAddQtl", mesh->Nlocal, mesh->o_LMM, -1.0, o_redTerm, o_pRhs);
+        flopCount += 3 * mesh->Nlocal;
+      }
+    }
 
     if (o_rhoSplitTerm.isInitialized()) {
       platform->linAlg->axpby(mesh->Nlocal, -1.0, o_rhoSplitTerm, 1.0, o_pRhs);
