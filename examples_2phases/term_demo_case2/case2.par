@@ -4,13 +4,16 @@ userSections = CASEDATA
 # 40 streamwise elements (vs case1's 20) roughly halves the element spacing, so dt had to
 # shrink too -- case1's dt=3e-3 blew up here (actual numerical divergence, not just a large
 # reported CFL number: resNorm/divUErr grew unboundedly within ~50 steps). Verified stable
-# (CFL flat at 0.312 for 500 steps) at dt=5e-4; numSteps chosen for total simulated time
-# T=8 (comparable margin to case1's T=6) to reach the fully-developed state.
+# (CFL flat at 0.312 for 500 steps) at dt=5e-4.
+# numSteps extended to T=32 (4x the original T=8) with Plan K's eq 90 dilation term retry
+# #2 in place: T=8 completed without blowing up, but u_c/u_d/alpha_d were still visibly
+# drifting at the outlet (u_c had gone negative, unphysical) -- not yet time-converged, so
+# T=8 wasn't long enough to compare against the paper's own STEADY (not transient) 1D model.
 polynomialOrder = 7
-numSteps = 32000
+numSteps = 128000
 dt = 2.5e-4
 timeStepper = tombo2
-checkpointInterval = 16000
+checkpointInterval = 32000
 scalars = alphad
 
 [FLUID PRESSURE]
@@ -76,6 +79,7 @@ residualTol = 1e-08
 
 [CASEDATA]
 # fieldExtract sampling cadence (in steps) -- read in case2.udf via platform->par->extract
-# and used as the "tstep % ioSample == 0" guard in UDF_ExecuteStep. numSteps=16000 /
-# ioSample=800 gives exactly 20 .vts dumps total (cap: no more than 20 per case).
-ioSample = 800
+# and used as the "tstep % ioSample == 0" guard in UDF_ExecuteStep. numSteps=128000 /
+# ioSample=1600 gives exactly 80 .vts dumps total -- denser than the old 20, needed to
+# resolve a time-history plot over the now-4x-longer run.
+ioSample = 1600

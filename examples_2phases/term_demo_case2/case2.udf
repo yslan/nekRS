@@ -30,21 +30,31 @@
 // it is NOT intended to quantitatively reproduce the paper's unpublished (on these 4 pages)
 // curve. See read_case2.py for the loose sanity check against Table III.
 //
-// *** eq 90 DILATION TERM -- KNOWN LIMITATION, not implemented here (see README.md) ***
+// *** eq 90 DILATION TERM -- RETRY #2, with Plan K (see wk_claude/plans/K_*.md) ***
 // scalarSolver_t only implements the NON-conservative transport ∂α/∂t + u.grad(α) =
 // D*lap(α); eq 90's real, CONSERVATIVE form adds a dilation term, ∂α_k/∂t + u_k.grad(α_k) +
 // α_k*div(u_k) = Gamma_k/rho_k. Without it, a uniform alpha field that already equals its
-// Dirichlet BC is an exact fixed point for ANY diffusionCoeff (both u.grad(alpha) and
-// D*lap(alpha) vanish identically when grad(alpha)=0) -- alpha_d stays frozen at its inlet
-// value (0.2083) rather than relaxing toward Table III's fully-developed value.
-// A real attempt to add this term (explicit source, implicit reaction term via
-// scalar_t::userImplicitLinearTerm, AVM regularization, [0,1] clamping, under-relaxation --
-// every combination tried) is backed up in case2_eq90_attempt.udf/.par: ALL of them produced
-// a genuine, likely ill-posed alpha<->pressure/momentum feedback loop that blows up around
-// t~0.22-0.32 (see README.md and case2_eq90_instability.png), consistently getting only
-// DELAYED, never cured, by stronger mitigation -- the signature of an unstable mode, not a
-// fixable discretization bug. Reverted here to the Bug-#2-fix-only state (frozen alpha_d,
-// but stable through the full run) rather than ship a case that crashes partway through.
+// Dirichlet BC is an exact fixed point for ANY diffusionCoeff -- alpha_d stays frozen at its
+// inlet value (0.2083) rather than relaxing toward Table III's fully-developed value.
+//
+// Retry #1 (minimal implicit-only variant, no clamp/relax/AVM) blew up at t~0.226-0.227,
+// essentially identical whether run before or after Plan J's mixture-forcing fix -- ruling
+// Plan J out as a contributing cause. Two gaps found since, re-deriving the algorithm against
+// (v2) directly:
+// 1. Plan K, Part A: the pressure equation (v2,105) was missing a BDF-lag-of-Q_bar term
+//    (Q_bar = div(u_bar), its own historical divergence) -- fixed in fluidSolver.cpp's
+//    solvePressure(). Validated bit-identical for case1 (where Q_bar~0 throughout); case2
+//    shows a small (~0.5-0.7%) but non-blowing-up shift, consistent with case2's genuine
+//    spatial development making div(u_bar) less trivially zero than case1's.
+// 2. Plan K, Part B (this retry): (v2)'s own text under eq 90 says to use an EXTRAPOLATED
+//    u_k for the dilation term's div(u_k), not the lagged/current one retry #1 used --
+//    alphaDilationImplicit() below now builds a one-off EXT-extrapolation of phase1's own
+//    velocity history, since fluidSolver_t's general o_Ue_phases[k] infrastructure is still
+//    an unpopulated stub (fluidSolver.cpp's own documented TODO).
+// This retry does NOT change the clamp/relax/AVM backup (case2_eq90_attempt.udf/.par) --
+// those remain backed up as before. If this retry also blows up, see README.md's "known
+// limitation" writeup; revert the same way (git checkout -- case2.udf case2.par) rather than
+// shipping a case that crashes.
 
 #include "fieldExtract.hpp"
 
@@ -171,16 +181,118 @@ void userf(double time)
                      o_extD);
 }
 
+// eq 90 dilation term, +alpha_d*div(u_d) moved to the LHS as a reaction term --
+// scalar_t::userImplicitLinearTerm's contract (scalarSolver.cpp's o_lambda1 lambda) is to
+// return a per-node coefficient ADDED to the Helmholtz solve's existing g0/dt*rho diagonal,
+// i.e. it multiplies alpha_d^{n+1} implicitly; it must NOT be pre-multiplied by alpha_d here
+// -- this is the linear-in-alpha_d coefficient itself, div(u_d), not the nonlinear product.
+// Only one scalar in this case (NSfields==1), so scalarIdx==0 always matches "alphad".
+//
+// Plan K, Part B: (v2)'s own text under eq 90 says to use an EXTRAPOLATED u_k here, not the
+// lagged/current one (what retry #1 used, via fluid->o_solution("phase1")). Build a one-off
+// EXT-extrapolation of phase1's own velocity history, same coefficients
+// (fluid->o_coeffEXT) and math fluidSolver_t::extrapolateSolution() uses for the mixture
+// o_Ue, just applied to o_U_phases[1] directly -- fluid->o_Ue_phases[1] itself is still an
+// unpopulated stub (fluidSolver.cpp's own documented TODO), so this is UDF-local, not a use
+// of that general (still-missing) infrastructure.
+occa::memory alphaDilationImplicit(double time, int scalarIdx)
+{
+  if (scalarIdx != 0) {
+    return o_NULL;
+  }
+  auto &fluid = nrs->fluid;
+
+  const auto nEXT = static_cast<int>(fluid->o_coeffEXT.size());
+  std::vector<dfloat> coeff(nEXT);
+  fluid->o_coeffEXT.copyTo(coeff.data(), nEXT);
+
+  const auto fieldOffsetSum = fluid->mesh->dim * fluid->fieldOffset;
+  auto o_udExtrap = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+  platform->linAlg->fill(fieldOffsetSum, 0.0, o_udExtrap);
+  for (int s = 0; s < nEXT; s++) {
+    auto o_level = fluid->o_U_phases[1].slice(s * fieldOffsetSum, fieldOffsetSum);
+    platform->linAlg->axpby(fieldOffsetSum, coeff[s], o_level, 1.0, o_udExtrap);
+  }
+
+  return opSEM::strongDivergence(fluid->mesh, fluid->fieldOffset, o_udExtrap);
+}
+
+// (v2, 105) RED term variant, UDF-opt-in via fluid->userRedTerm (fluidSolver.hpp/.cpp,
+// Plan L): -div(sum_k alpha_k*div(nu_k*(grad(Ubar_k)+grad(Ubar_k)^T))), Ubar_k = u_k - u_bar
+// (eq 86). Uses the SIMPLIFIED Laplacian form (div(nu_k*grad(Ubar_k)), one scalar
+// strongLaplacian per component) instead of the full symmetric stress tensor -- matching
+// this codebase's own existing simplification for tau_k elsewhere (STRESSFORMULATION=FALSE
+// default, fluidSolver.cpp's own comment on the phasic momentum equation). Not a fix for the
+// div(u_bar) closure gap (see README.md/notes/07_*.md -- this term is an ADDITIONAL viscous
+// RHS forcing, not a new constraint splitting div(u_c)/div(u_d) individually); added as a
+// regularization experiment, same spirit as the earlier (pre-Plan-K) AVM/clamp/relax
+// attempts -- may slow the divUErr growth without fixing its root cause.
+occa::memory computeRedTerm(double time)
+{
+  auto &fluid = nrs->fluid;
+  const auto N = fluid->mesh->Nlocal;
+  const auto fieldOffset = fluid->fieldOffset;
+  const auto fieldOffsetSum = fluid->mesh->dim * fieldOffset;
+
+  auto o_sum = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+  platform->linAlg->fill(fieldOffsetSum, 0.0, o_sum);
+
+  for (int k = 0; k < fluid->Nphase; k++) {
+    // Ubar_k = u_k - u_bar (level 0 of each -- today's current state)
+    auto o_Ubar = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+    o_Ubar.copyFrom(fluid->o_U_phases[k].slice(0, fieldOffsetSum), fieldOffsetSum);
+    platform->linAlg->axpby(fieldOffsetSum, -1.0, fluid->o_U.slice(0, fieldOffsetSum), 1.0, o_Ubar);
+
+    // nu_k = mue_k / rho_k
+    auto o_nuK = platform->deviceMemoryPool.reserve<dfloat>(fieldOffset);
+    platform->linAlg->axdyz(N, 1.0, fluid->o_mue_phases[k], fluid->o_rho_phases[k], o_nuK);
+
+    // div(nu_k*grad(Ubar_k)), component by component (simplified Laplacian form)
+    auto o_lapK = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+    for (int d = 0; d < fluid->mesh->dim; d++) {
+      auto o_comp = o_Ubar.slice(d * fieldOffset, fieldOffset);
+      auto o_lapComp = opSEM::strongLaplacian(fluid->mesh, fieldOffset, o_nuK, o_comp);
+      o_lapK.slice(d * fieldOffset, fieldOffset).copyFrom(o_lapComp, fieldOffset);
+    }
+
+    // weight by alpha_k, accumulate over phases
+    platform->linAlg->axmyVector(N, fieldOffset, 0, 1.0, fluid->o_alpha_phases[k], o_lapK);
+    platform->linAlg->axpby(fieldOffsetSum, 1.0, o_lapK, 1.0, o_sum);
+  }
+
+  return opSEM::strongDivergence(fluid->mesh, fieldOffset, o_sum);
+}
+
 // Plan G alpha-transport hook: runs after scalar->solve() (so "alphad" is current) and
 // before fluid's own updateMixtureProperties()/solve() (confirmed call site, nrs.cpp
 // ~line 1927) -- exactly the right spot to push the scalar's solution into
 // fluid->o_alpha_phases[1] and re-derive o_alpha_phases[0] as an algebraic identity.
-// KNOWN LIMITATION (see header comment): alpha_d is frozen at its inlet value by the
-// (stable) scalar equation alone, since eq 90's dilation term is not implemented here.
 void myPreFluid(double time, int tstep)
 {
   auto &fluid = nrs->fluid;
-  fluid->setAlphaPhase(1, nrs->scalar->o_solution("alphad"));
+  auto o_alphaD = nrs->scalar->o_solution("alphad");
+
+  // DIAGNOSTIC: alpha_d overshoot and div(u_d) magnitude -- same as retry #1, kept to
+  // directly compare growth behavior against that run's known t~0.226 blowup.
+  if (tstep % 5 == 0) {
+    const auto N = fluid->mesh->Nlocal;
+    const auto aMin = platform->linAlg->min(N, o_alphaD, platform->comm.mpiComm());
+    const auto aMax = platform->linAlg->max(N, o_alphaD, platform->comm.mpiComm());
+    auto o_divUd = opSEM::strongDivergence(fluid->mesh, fluid->fieldOffset, fluid->o_solution("phase1"));
+    const auto dMin = platform->linAlg->min(N, o_divUd, platform->comm.mpiComm());
+    const auto dMax = platform->linAlg->max(N, o_divUd, platform->comm.mpiComm());
+    if (platform->comm.mpiRank() == 0) {
+      printf("DBGDIV step=%d t=%.6e alphad[min,max]=(%.6e,%.6e) divUd[min,max]=(%.6e,%.6e)\n",
+             tstep,
+             time,
+             aMin,
+             aMax,
+             dMin,
+             dMax);
+    }
+  }
+
+  fluid->setAlphaPhase(1, o_alphaD);
   fluid->deriveLastAlphaPhase(0);
 }
 
@@ -193,6 +305,18 @@ void UDF_Setup()
 
   nrs->userSource = &userf;
   nrs->preFluid = &myPreFluid;
+  nrs->scalar->userImplicitLinearTerm = &alphaDilationImplicit;
+  // DISABLED (after a real fix + retest, not a dead end this time): computeRedTerm()'s
+  // first attempt blew up instantly (step 2-3, resNorm0 ~1e9) due to a genuine bug in
+  // opSEM::strongLaplacian (found+fixed this session, src/core/opSEM.cpp -- it
+  // double-applied the oogs gather-scatter-sum + invAJw normalization). With that fixed,
+  // the term computes correctly and no longer causes an instant blowup -- but retested on
+  // the full T=32 run, it still blows up at essentially the same time (t~7.94 vs ~7.75
+  // without it), confirming the term is real but too small (as predicted beforehand from
+  // its own nu_k scaling) to meaningfully affect the root div(u_bar) closure gap. Left
+  // disabled by default (no benefit, extra runtime cost); the hook and the opSEM.cpp fix
+  // are both kept since they're correct and may be useful for other work.
+  // fluid->userRedTerm = &computeRedTerm;
 
   // IC: both phases at their inlet velocity, alpha at its inlet value everywhere (uniform
   // IC; the profile then relaxes toward the fully-developed state as the run proceeds).
