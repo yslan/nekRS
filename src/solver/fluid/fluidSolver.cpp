@@ -543,31 +543,33 @@ void fluidSolver_t::solvePressure(double time, int stage)
     launchKernel("fluidSolver_t::pressureAddQtl", mesh->Nlocal, mesh->o_LMM, g0idt, o_div, o_pRhs);
     flopCount += 3 * mesh->Nlocal;
 
-    // Plan K, (v2,105): the missing BDF-lag-of-Q_bar term -- a genuine BDF-lag of the
-    // mixture divergence's OWN history, not representable by the single-level o_div above
-    // (which only ever carries Q_bar^{n+1}'s role, via pressureAddQtl's leading gamma0/dt
-    // term, or an opt-in userDivergence source for the classic case). div() is linear, so
-    // this is div() of the UNWEIGHTED BDF-combination of o_U's own (Plan J-correct) history,
-    // not a per-level divergence -- see wk_claude/plans/K_*.md. Scoped to 2-phase only;
-    // classic single-phase's pressureAddQtl/userDivergence path above is untouched.
-    //
-    // Sign: (v2,105)'s literal bracket reads "-Sum_q a_q*Q_bar^{n-q}/dt" (negative), but
-    // case1 went unstable (divUErr growing geometrically from step 1, confirmed via a
-    // DBGQBAR magnitude printf that the term itself was small -- ~1e-7 -- yet the growth
-    // rate matched divUErr's own, a genuine feedback instability, not noise/NaN) with that
-    // literal sign; POSITIVE (matching pressureAddQtl's existing leading term's own sign
-    // convention) is what's actually stable and reproduces case1's bit-identical pre-Plan-K
-    // numbers. Not fully reconciled symbolically against the paper's own parenthesization
-    // (likely a sign-convention difference in this codebase's own o_div/"qtl" definition
-    // relative to the paper's bare Q_bar symbol) -- confirmed empirically, same bit-identical
-    // discipline as Plan J.
-    if (!o_alpha_phases.empty()) {
-      auto o_UbdfRaw = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
-      combineLagLevels(o_coeffBDF, o_U, static_cast<int>(o_coeffBDF.size()), o_UbdfRaw, /*applyJacobianWeight=*/false);
-      auto o_QbdfLag = opSEM::strongDivergence(mesh, fieldOffset, o_UbdfRaw);
-      launchKernel("fluidSolver_t::pressureAddQtl", mesh->Nlocal, mesh->o_LMM, 1.0 / dt[0], o_QbdfLag, o_pRhs);
-      flopCount += 3 * mesh->Nlocal;
-    }
+    // Plan K's (v2,105) "lagged Q_bar" term -- REMOVED (Plan M finding, wk_claude/plans/
+    // M_manufactured_profile_staged_freeze_debug.md). Re-deriving eq 105->106->108: the
+    // OCR'd "Sum_q a_q*Q_bar_k^{n-q}/dt" in eq 105 is a mis-read of "Sum_q a_q*u_bar^{n-q}
+    // /dt" (bold u-bar, the VELOCITY vector, confirmed unambiguously by eq 106's own
+    // rendering of the identical bracket using u_bar). That term is NOT an independent
+    // scalar source (f,q)_Omega needing its own Qtl-style addition -- it is a VECTOR folded
+    // into the gradient-type weak form (f,grad(q))_Omega, the same bucket as advection/
+    // gravity, whose boundary-flux counterterm cancels out via the pressure-BC substitution
+    // (eq 107) in the final eq 108, leaving only the existing (n.u_bar^{n+1}) boundary term
+    // (divergenceSurfaceHex3D below, using TODAY's o_U, already correct).
+    // updateMixtureForcing() (Plan J, pre-existing) ALREADY computes this exact quantity
+    // correctly via that same gradient route: its "BDF part" is
+    // combineLagLevels(o_coeffBDF, o_U, ..., o_JwF); scale(1/dt[0], o_JwF) -- i.e.
+    // Sum_q a_q*u_bar^{n-q}/dt, fed into o_JwF -> pressureRhsHex3D ->
+    // core-wDivergenceVolumeHex3D, the correct (f,grad(q))_Omega assembly with boundary
+    // handling already covered by divergenceSurfaceHex3D.
+    // This block instead took the DIVERGENCE of that same quantity and injected it as a
+    // second, separately-discretized scalar source via pressureAddQtl (missing its own
+    // boundary term) -- a duplicate of a term already present, not a missing one. case1's
+    // bit-identical regression never caught this because case1 has alpha_d=0 exactly, so
+    // u_bar=u_c has near-zero divergence throughout (ordinary single-phase guarantee),
+    // making this term's own divergence numerically negligible there regardless of sign --
+    // not because it was correct. Confirmed via Plan M's L1a/L0 staged-freeze tests:
+    // divUErr grew linearly (not flat) once alpha had real spatial structure AND velocity
+    // genuinely evolved, consistent with this redundant term's own magnitude scaling with
+    // however much Q_bar had already drifted (self-reinforcing bias, not exponential
+    // instability).
 
     launchKernel("fluidSolver_t::divergenceSurfaceHex3D",
                  mesh->Nelements,

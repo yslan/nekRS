@@ -5,9 +5,16 @@ eq 14/15, d(alpha_k*u_k)/dz=0 in the STEADY state) inlet value -- see wk_claude/
 
 Reads whatever case2*.vts dumps are present (works whether the run completed or aborted
 partway through, e.g. run_T32_blowup.log's T=32 attempt, which aborted around t~8-9.6).
+
+Usage: python3 plot_case2_timehistory.py [label]
+  label (optional): appended to every output filename, e.g. "solve_alphad" ->
+  case2_fig_timehistory_solve_alphad.png + case2_timehistory_solve_alphad.npz. Also saves
+  the extracted arrays (ts, uc_out, ud_out, ad_out, flux_c, flux_d) to .npz either way, for
+  exact numeric comparison between retries without needing to keep every .vts dump.
 """
 import glob
 import re
+import sys
 
 import numpy as np
 import matplotlib
@@ -26,6 +33,9 @@ UC_FD, UD_FD, ALPHAD_FD = 0.9318, 1.386, 0.1504
 
 
 def main():
+    label = sys.argv[1] if len(sys.argv) > 1 else ""
+    suffix = f"_{label}" if label else ""
+
     files = sorted(glob.glob("case2[0-9][0-9][0-9][0-9][0-9].vts"),
                     key=lambda f: int(re.search(r"(\d+)\.vts$", f).group(1)))
     if not files:
@@ -56,6 +66,10 @@ def main():
     print(f"mass flux at t_final: alpha_c*u_c={flux_c[-1]:.4f} (inlet {FLUX_C_IN:.4f}), "
           f"alpha_d*u_d={flux_d[-1]:.4f} (inlet {FLUX_D_IN:.4f})")
 
+    np.savez(f"case2_timehistory{suffix}.npz",
+             ts=ts, uc_out=uc_out, ud_out=ud_out, ad_out=ad_out, flux_c=flux_c, flux_d=flux_d)
+    print(f"wrote case2_timehistory{suffix}.npz")
+
     fig, axes = plt.subplots(2, 1, figsize=(7, 8), sharex=True)
 
     ax = axes[0]
@@ -81,8 +95,9 @@ def main():
     ax.legend(fontsize=8)
 
     fig.tight_layout()
-    fig.savefig("case2_fig_timehistory.png", dpi=150)
-    print("wrote case2_fig_timehistory.png")
+    outname = f"case2_fig_timehistory{suffix}.png"
+    fig.savefig(outname, dpi=150)
+    print(f"wrote {outname}")
 
 
 if __name__ == "__main__":
