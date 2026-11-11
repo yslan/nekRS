@@ -22,29 +22,44 @@
 //   C_D = (24/Re_d) * (1 + 0.15 * Re_d^0.687),  Re_d <= 1000,
 // clipped to Stokes drag C_D = 24/Re_d for very small Re_d (and Re_d itself floored away
 // from 0 to avoid a divide-by-zero when u_d == u_c exactly, e.g. at t=0 IC). Re_d is formed
-// against the SAME nondimensional viscosity used below for the momentum equations'
-// numerical regularizer (viscosity = 1e-4 in case2.par) -- the paper's own eq 16/17 have NO
-// diffusion term at all ("diffusion terms have been neglected as insignificant"), so that
-// viscosity is purely a numerical device, and so is its reuse here as nu_c for Re_d. This
-// is a template demonstration of how a variable-C_D drag law gets wired into userSource --
-// it is NOT intended to quantitatively reproduce the paper's unpublished (on these 4 pages)
-// curve. See read_case2.py for the loose sanity check against Table III.
+// against NU_C below (same value as the paper's own eq 16/17 "diffusion terms neglected as
+// insignificant" -- there is no physical viscosity in the paper's model at all; NU_C here is
+// purely a Schiller-Naumann scale, decoupled from [FLUID VELOCITY] viscosity, see Plan M/N
+// note below). This is a template demonstration of how a variable-C_D drag law gets wired
+// into userSource -- it is NOT intended to quantitatively reproduce the paper's unpublished
+// (on these 4 pages) curve. See read_case2.py for the loose sanity check against Table III.
 //
-// *** eq 90 DILATION TERM -- KNOWN LIMITATION, not implemented here (see README.md) ***
-// scalarSolver_t only implements the NON-conservative transport ∂α/∂t + u.grad(α) =
-// D*lap(α); eq 90's real, CONSERVATIVE form adds a dilation term, ∂α_k/∂t + u_k.grad(α_k) +
-// α_k*div(u_k) = Gamma_k/rho_k. Without it, a uniform alpha field that already equals its
-// Dirichlet BC is an exact fixed point for ANY diffusionCoeff (both u.grad(alpha) and
-// D*lap(alpha) vanish identically when grad(alpha)=0) -- alpha_d stays frozen at its inlet
-// value (0.2083) rather than relaxing toward Table III's fully-developed value.
-// A real attempt to add this term (explicit source, implicit reaction term via
-// scalar_t::userImplicitLinearTerm, AVM regularization, [0,1] clamping, under-relaxation --
-// every combination tried) is backed up in case2_eq90_attempt.udf/.par: ALL of them produced
-// a genuine, likely ill-posed alpha<->pressure/momentum feedback loop that blows up around
-// t~0.22-0.32 (see README.md and case2_eq90_instability.png), consistently getting only
-// DELAYED, never cured, by stronger mitigation -- the signature of an unstable mode, not a
-// fixable discretization bug. Reverted here to the Bug-#2-fix-only state (frozen alpha_d,
-// but stable through the full run) rather than ship a case that crashes partway through.
+// *** eq 90 DILATION TERM: solve alpha_d only, derive alpha_c = 1-alpha_d ***
+// scalarSolver_t only implements the NON-conservative transport d(alpha)/dt + u.grad(alpha)
+// = D*lap(alpha); eq 90's real, CONSERVATIVE form adds a dilation term, d(alpha_k)/dt +
+// u_k.grad(alpha_k) + alpha_k*div(u_k) = Gamma_k/rho_k. Provided via scalar_t::
+// userImplicitLinearTerm (alphaDilationImplicit below), using an EXTRAPOLATED u_d per (v2)'s
+// own text under eq 90.
+//
+// Of the alpha-handling variants tried (Plans K/L/M, see README.md's full history): solving
+// ONLY alpha_d and deriving alpha_c = 1-alpha_d algebraically (this file) consistently
+// outperformed solving alpha_c alone, or solving both independently with either additive or
+// multiplicative sum=1 reconciliation (README.md's retries #2/#3/#4a/#4b table).
+//
+// *** Plan M/N: genuine stabilization found, src/ bug fixed ***
+// A staged debugging campaign (Plan M, wk_claude/plans/M_*.md) found and fixed a real
+// duplicate-term bug in fluidSolver.cpp's solvePressure() (Plan N) -- removing it exposed a
+// SEPARATE, genuine (dt-independent, i.e. NOT a numerical/CFL artifact) feedback
+// instability between alpha_d and the velocity fields (specifically u_c, confirmed via
+// Plan M's own "which field starts it" trace), showing up as Gibbs-type ringing right at
+// the inlet. Of everything tried to address it (AVM, HPFRT, GJP, the (v2,105) RED term,
+// larger alpha diffusivity alone -- all either did nothing or only delayed the blowup, see
+// README.md's regularization test matrix), only raising the VELOCITY equations' own
+// `viscosity` (NOT alpha_d's diffusionCoeff) to 1e-2 -- paired with a correspondingly
+// smaller dt to resolve the now-stiffer diffusion -- achieved genuine, flat stabilization.
+// alpha_d itself only needs AVM at its ORIGINAL (small, numerical-regularizer) diffusionCoeff
+// for the best accuracy (AVM's targeted, localized dissipation only activates where real
+// noise is detected, e.g. right at the inlet, rather than diffusing alpha_d everywhere).
+// Validated to T=1.0 (see case2.par); NOT yet re-validated at longer (T=8/T=32) durations --
+// flagged as a follow-up, not assumed.
+//
+// Comparison data for retries #2/#3/#4a/#4b backed up as case2_solve_*.{udf,par} and
+// *_solve_*.{png,log,npz} -- see README.md.
 
 #include "fieldExtract.hpp"
 
@@ -59,15 +74,16 @@ static constexpr dfloat RHO_C = 1.0;
 static constexpr dfloat RHO_D = 0.2;
 static constexpr dfloat D_D = 0.5;
 static constexpr dfloat GRAV = 0.9807;
-static constexpr dfloat NU_C = 1e-4; // == [FLUID VELOCITY] viscosity in case2.par; reused
-                                      // here as the nondimensional nu_c for Re_d (see note
-                                      // above -- a numerical regularizer repurposed as the
-                                      // Schiller-Naumann correlation's viscosity scale).
+static constexpr dfloat NU_C = 1e-4; // Schiller-Naumann Re_d scale only (see header note) --
+                                      // intentionally decoupled from [FLUID VELOCITY]
+                                      // viscosity (now 1e-2, a genuine stabilizer, not a
+                                      // numerical regularizer -- see Plan M/N note above).
 
 // Table II: inlet conditions (z=0).
 static constexpr dfloat UC_IN = 1.0;
 static constexpr dfloat UD_IN = 1.0;
 static constexpr dfloat ALPHAD_IN = 0.2083;
+static constexpr dfloat ALPHAC_IN = 1.0 - ALPHAD_IN; // 0.7917
 
 #ifdef __okl__
 
@@ -118,8 +134,7 @@ void udfDirichlet(bcData *bc)
     const dfloat relMag = fabs(rel);
 
     // Schiller-Naumann drag correlation (TEMPLATE SUBSTITUTION, see header comment) --
-    // Re_d against the same nondimensional viscosity used for the momentum equations'
-    // numerical regularizer (NU_C == [FLUID VELOCITY] viscosity in case2.par).
+    // Re_d against NU_C (decoupled from [FLUID VELOCITY] viscosity, see header note).
     const dfloat Re = (relMag > 1e-6 ? relMag : 1e-6) * D_D / NU_C;
     dfloat CD;
     if (Re < 1e-3) {
@@ -171,16 +186,53 @@ void userf(double time)
                      o_extD);
 }
 
-// Plan G alpha-transport hook: runs after scalar->solve() (so "alphad" is current) and
-// before fluid's own updateMixtureProperties()/solve() (confirmed call site, nrs.cpp
-// ~line 1927) -- exactly the right spot to push the scalar's solution into
-// fluid->o_alpha_phases[1] and re-derive o_alpha_phases[0] as an algebraic identity.
-// KNOWN LIMITATION (see header comment): alpha_d is frozen at its inlet value by the
-// (stable) scalar equation alone, since eq 90's dilation term is not implemented here.
+// eq 90 dilation term, +alpha_d*div(u_d) moved to the LHS as a reaction term --
+// scalar_t::userImplicitLinearTerm's contract (scalarSolver.cpp's o_lambda1 lambda) is to
+// return a per-node coefficient ADDED to the Helmholtz solve's existing g0/dt*rho diagonal,
+// i.e. it multiplies alpha_d^{n+1} implicitly; it must NOT be pre-multiplied by alpha_d here
+// -- this is the linear-in-alpha_d coefficient itself, div(u_d), not the nonlinear product.
+// Only "alphad" exists as a scalar (scalars = alphad in case2.par), so scalarIdx is always 0.
+//
+// Plan K, Part B: (v2)'s own text under eq 90 says to use an EXTRAPOLATED u_d here, not the
+// lagged/current one. Build a one-off EXT-extrapolation of phase1's own velocity history,
+// same coefficients (fluid->o_coeffEXT) and math fluidSolver_t::extrapolateSolution() uses
+// for the mixture o_Ue, just applied to o_U_phases[1] directly -- fluid->o_Ue_phases[phase]
+// itself is still an unpopulated stub (fluidSolver.cpp's own documented TODO), so this is
+// UDF-local, not a use of that general (still-missing) infrastructure.
+occa::memory alphaDilationImplicit(double time, int scalarIdx)
+{
+  if (scalarIdx != 0) {
+    return o_NULL;
+  }
+  auto &fluid = nrs->fluid;
+  const int phase = 1; // "alphad" -> phase1 (dispersed), eq 15
+
+  const auto nEXT = static_cast<int>(fluid->o_coeffEXT.size());
+  std::vector<dfloat> coeff(nEXT);
+  fluid->o_coeffEXT.copyTo(coeff.data(), nEXT);
+
+  const auto fieldOffsetSum = fluid->mesh->dim * fluid->fieldOffset;
+  auto o_uExtrap = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+  platform->linAlg->fill(fieldOffsetSum, 0.0, o_uExtrap);
+  for (int s = 0; s < nEXT; s++) {
+    auto o_level = fluid->o_U_phases[phase].slice(s * fieldOffsetSum, fieldOffsetSum);
+    platform->linAlg->axpby(fieldOffsetSum, coeff[s], o_level, 1.0, o_uExtrap);
+  }
+
+  return opSEM::strongDivergence(fluid->mesh, fluid->fieldOffset, o_uExtrap);
+}
+
+// Plan G alpha-transport hook: runs after scalar->solve() (alphad is current) and before
+// fluid's own updateMixtureProperties()/solve() (confirmed call site, nrs.cpp ~line 1927).
+// alpha_c = 1 - alpha_d, ALWAYS derived (never independently solved) -- fluid->
+// deriveLastAlphaPhase makes sum_k alpha_k=1 an exact algebraic identity instead of
+// something that has to emerge numerically from two independent discretizations (see
+// README.md's retries #2 vs #4a/#4b comparison for why this derive-only approach won out).
 void myPreFluid(double time, int tstep)
 {
   auto &fluid = nrs->fluid;
-  fluid->setAlphaPhase(1, nrs->scalar->o_solution("alphad"));
+  auto o_alphaD = nrs->scalar->o_solution("alphad");
+  fluid->setAlphaPhase(1, o_alphaD);
   fluid->deriveLastAlphaPhase(0);
 }
 
@@ -193,6 +245,7 @@ void UDF_Setup()
 
   nrs->userSource = &userf;
   nrs->preFluid = &myPreFluid;
+  nrs->scalar->userImplicitLinearTerm = &alphaDilationImplicit;
 
   // IC: both phases at their inlet velocity, alpha at its inlet value everywhere (uniform
   // IC; the profile then relaxes toward the fully-developed state as the run proceeds).
@@ -206,27 +259,33 @@ void UDF_Setup()
     platform->linAlg->fill(mesh->Nlocal, UD_IN, o_disp.slice(0, fluid->fieldOffset));
 
     platform->linAlg->fill(mesh->Nlocal, ALPHAD_IN, fluid->o_alpha_phases[1]);
-    platform->linAlg->fill(mesh->Nlocal, 1.0 - ALPHAD_IN, fluid->o_alpha_phases[0]);
+    platform->linAlg->fill(mesh->Nlocal, ALPHAC_IN, fluid->o_alpha_phases[0]);
 
-    // Scalar IC must match, or the first preFluid call will overwrite alpha_phases[1]
-    // with whatever the scalar solver's own (unset) IC was. scalar_t::o_solution() already
-    // returns a view sized to the scalar's own fieldOffset (unlike fluid's o_solution(),
-    // which returns the full multi-component phase velocity and needs an extra slice()).
+    // Scalar IC must match, or myPreFluid's first call would derive alpha_c from whatever
+    // the scalar solver's own (unset) IC was. scalar_t::o_solution() already returns a view
+    // sized to the scalar's own fieldOffset (unlike fluid's o_solution(), which returns the
+    // full multi-component phase velocity and needs an extra slice()).
     platform->linAlg->fill(mesh->Nlocal, ALPHAD_IN, nrs->scalar->o_solution("alphad"));
   }
 
   // [fieldExtract] one line along the flow direction (x), sampled at the cross-section
-  // centerline, reproducing the spirit of Fig. 2/3 of trans_v116_n1_pp1251-1254.pdf for this
-  // case. Validation/plotting happens entirely in Python (read_case2.py) -- this UDF only
-  // samples and writes.
+  // centerline, reproducing the spirit of Fig. 2/3/4 of trans_v116_n1_pp1251-1254.pdf for
+  // this case. Validation/plotting happens entirely in Python (read_case2.py) -- this UDF
+  // only samples and writes. "mixture"/"pressure" are fluidSolver_t::o_solution()'s own
+  // special-case keys (fluidSolver.hpp) for the shared (not per-phase) mixture velocity
+  // (o_U, Fig. 2's "Mixture" curve) and mixture pressure (o_P, Fig. 4) fields.
   {
     std::vector<int> boxDims = {81, 1, 1}; // npts in X, Y, Z (endpoints included)
     std::vector<fieldExtract::field> fldList;
     deviceMemory<dfloat> o_uc(fluid->o_solution("phase0").slice(0, fluid->fieldOffset));
     deviceMemory<dfloat> o_ud(fluid->o_solution("phase1").slice(0, fluid->fieldOffset));
+    deviceMemory<dfloat> o_um(fluid->o_solution("mixture").slice(0, fluid->fieldOffset));
+    deviceMemory<dfloat> o_p(fluid->o_solution("pressure").slice(0, fluid->fieldOffset));
     deviceMemory<dfloat> o_ad(nrs->scalar->o_solution("alphad"));
     fldList.push_back({"uc", std::vector{o_uc}});
     fldList.push_back({"ud", std::vector{o_ud}});
+    fldList.push_back({"um", std::vector{o_um}});
+    fldList.push_back({"p", std::vector{o_p}});
     fldList.push_back({"alphad", std::vector{o_ad}});
 
     std::array<dfloat, 3> x0 = {0.0, 0.05, 0.05};
@@ -240,7 +299,7 @@ void UDF_ExecuteStep(double time, int tstep)
   // [fieldExtract] sample periodically (cadence from [CASEDATA] ioSample, case2.par); the
   // final dump (lastStep) is the steady profile compared against Table II (inlet)/Table III
   // (outlet). tstep > 0 guard: skip the t=0 IC dump so numSteps/ioSample sets the exact dump
-  // count (e.g. 16000/800 = 20), not one extra.
+  // count, not one extra.
   if ((tstep > 0 && tstep % ioSample == 0) || nrs->lastStep) {
     sampler->process(time, tstep);
   }

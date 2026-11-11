@@ -69,6 +69,13 @@ fluidSolver_t::fluidSolver_t(const fluidSolverCfg_t &cfg, const std::unique_ptr<
   platform->options.getArgs("SUBCYCLING STEPS", Nsubsteps);
 
   o_U = platform->device.malloc<dfloat>(fieldOffsetSum * std::max(o_coeffBDF.size(), o_coeffEXT.size()));
+  // Plan J: updateMixtureVelocity() now only ever writes o_U's level 0 (not a full rebuild
+  // every call, see its own comment), so levels 1..n-1 are never touched until enough real
+  // steps have passed to fill them via lagSolution()'s shift. Zero them up front -- same
+  // "avoid solving from garbage" reasoning as o_U_phases[i]'s fill below -- since their BDF/
+  // EXT coefficients are correctly zeroed during the startup order-ramp, but 0*garbage can
+  // still be NaN if the garbage happens to contain a NaN bit pattern.
+  platform->linAlg->fill(o_U.size(), 0.0, o_U);
 
   if (!platform->options.compareArgs(upperCase(mixtureVelocityName) + " EXTRAPOLATION", "FALSE")) {
     o_Ue = platform->device.malloc<dfloat>(fieldOffsetSum);
@@ -287,40 +294,76 @@ void fluidSolver_t::updateMixtureProperties()
   platform->linAlg->axmyz(mesh->Nlocal, 1.0, o_rho, o_nuSum, o_mue);
 }
 
-// eq 81: u_bar = sum_k alpha_k*u_k, reconstructed at every BDF/EXT history level stored in
-// o_U/o_U_phases (each phase's CURRENT alpha_k is used at every level -- alpha has no lag
-// history of its own yet, a documented approximation, same as elsewhere). Classic case:
-// o_U_phases[0] already aliases o_U directly (solveVelocity wrote it there), nothing to do.
+// Plan J helper: Sum_{s=0}^{nLevels-1} o_coeff[s]*[JW*]o_field[level s] -> o_out (one level's
+// worth, fieldOffsetSum long). The JW (mesh->o_Jw) factor matters for a Jacobian-WEIGHTED
+// target like "o_JwF" (matching sumMakef.okl's own "bdfx += coeffBDF[s]*JW*U[...]"), but NOT
+// for a plain (unweighted) velocity combination whose divergence will be taken afterward and
+// fed through a kernel (pressureAddQtl) that applies its own mass-matrix weighting --
+// applyJacobianWeight selects which (Plan K: the new Q_bar BDF-lag term needs false; Plan
+// J's o_JwF/ADV/"+g" combinations need true, unchanged). Missing this weighting (when it IS
+// needed) was a real bug caught by case1 blowing up during Plan J (bit-identical-to-old-code
+// arithmetic only works if the weighting matches too). Not handling the p_MovingMesh
+// per-level-JW variant (not needed for any current 2-phase case; sumMakef itself only varies
+// JW per-level under that define). o_coeff is read back to host (nLevels is O(2-3),
+// negligible) so plain axpby can combine whole fieldOffsetSum-sized blocks at once -- axpby
+// has no notion of fieldOffset/component stride, so this is correct whether o_field
+// represents 1 or mesh->dim stacked components.
+void fluidSolver_t::combineLagLevels(const occa::memory &o_coeff,
+                                      const occa::memory &o_field,
+                                      int nLevels,
+                                      occa::memory &o_out,
+                                      bool applyJacobianWeight)
+{
+  std::vector<dfloat> coeff(nLevels);
+  o_coeff.copyTo(coeff.data(), nLevels);
+
+  platform->linAlg->fill(fieldOffsetSum, 0.0, o_out);
+  for (int s = 0; s < nLevels; s++) {
+    auto o_weighted = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+    o_weighted.copyFrom(o_field.slice(s * fieldOffsetSum, fieldOffsetSum), fieldOffsetSum);
+    if (applyJacobianWeight) {
+      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, mesh->o_Jw, o_weighted); // *= JW
+    }
+    platform->linAlg->axpby(fieldOffsetSum, coeff[s], o_weighted, 1.0, o_out);
+  }
+}
+
+// (v2, 81): u_bar = sum_k alpha_k*u_k -- writes ONLY o_U's level-0 (current) entry, using
+// TODAY's alpha_k^{n+1} and o_U_phases[k]'s own level-0 (see fluidSolver.hpp's comment: at
+// this call site solveVelocity() for THIS step hasn't run yet, so this is last step's
+// interior values + this step's fresh Dirichlet boundary values -- same as what the old,
+// buggy full-rebuild wrote for level 0 specifically; only levels 1..n-1 change, see Plan J,
+// wk_claude/plans/J_*.md). Classic case: o_U_phases[0] already aliases o_U directly
+// (solveVelocity wrote it there), nothing to do.
 void fluidSolver_t::updateMixtureVelocity()
 {
   if (o_alpha_phases.empty()) {
     return;
   }
 
-  const int nLevels = std::max(static_cast<int>(o_coeffBDF.size()), static_cast<int>(o_coeffEXT.size()));
-  for (int s = 0; s < nLevels; s++) {
-    auto o_level = o_U.slice(s * fieldOffsetSum, fieldOffsetSum);
-    platform->linAlg->fill(fieldOffsetSum, 0.0, o_level);
-    for (int k = 0; k < Nphase; k++) {
-      auto o_term = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
-      o_term.copyFrom(o_U_phases[k].slice(s * fieldOffsetSum, fieldOffsetSum), fieldOffsetSum);
-      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_alpha_phases[k], o_term);
-      platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, 1.0, o_term, 1.0, o_level);
-    }
+  auto o_level0 = o_U.slice(0, fieldOffsetSum);
+  platform->linAlg->fill(fieldOffsetSum, 0.0, o_level0);
+  for (int k = 0; k < Nphase; k++) {
+    auto o_term = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+    o_term.copyFrom(o_U_phases[k].slice(0, fieldOffsetSum), fieldOffsetSum);
+    platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_alpha_phases[k], o_term);
+    platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, 1.0, o_term, 1.0, o_level0);
   }
 }
 
-// eq 99: the pressure-equation forcing is density-FREE: sum_k alpha_k*(BDF(u_k)+ADV(u_k)).
-// o_JwF_phases[k] (from makeForcing(), built earlier in initInnerStep) is rho_k*(BDF+ADV)
-// (eq 97's own, correctly-scaled form, needed as-is by solveVelocity). So here: divide each
-// phase's forcing by its own rho_k, weight by alpha_k, sum (density-free) -- then re-scale
-// the sum by rho_bar, so that solvePressure's existing kernel (which multiplies the whole
-// o_JwF by 1/rho_bar) recovers exactly that density-free quantity, same as it already does
-// for the single-phase case (rho_bar==rho there, so the two factors cancel exactly). Writes
-// into the bare o_JwF member, which solvePressure already reads unchanged. Classic case is
-// just a copy (rho_bar==rho_0, so the divide-then-rescale is a no-op); unlike
-// updateMixtureVelocity(), this always runs -- o_JwF_phases[0] is never aliased to bare
-// o_JwF (phase 0's own forcing must survive past this call, for solveVelocity(0) to use).
+// (v2, 108)'s forcing bracket: Sum_q a_q*ubar^{n-q}/dt - Sum_k alpha_k^{n+1}*[Sum_q
+// b_q*(u_k.grad(u_k))^{n-q}] + g (the "+g" is Sum_k alpha_k^{n+1}*[EXT-combined
+// o_EXT_phases[k]] -- userSource's gravity/drag/etc, ADDED like sumMakef's own FU term, not
+// subtracted like the ADV term; a first attempt at this fix dropped this term entirely,
+// caught by case1 converging to a visibly worse residual against eq 21 -- 2.7e-4 vs the
+// previously-established 7e-5 -- instead of being bit-identical, which it must be: case1's
+// alpha is hardcoded constant from t=0, so this fix is a pure algebraic rearrangement with
+// zero behavior change for any constant-alpha case). Both pieces density-free, matching the
+// existing convention (confirmed by reading sumMakef.okl: RHO is passed in but never
+// referenced in the kernel body; density is applied downstream at the point of use). Classic
+// case is just a copy (unchanged); unlike updateMixtureVelocity(), this always runs --
+// o_JwF_phases[0] is never aliased to bare o_JwF (phase 0's own forcing must survive past
+// this call, for solveVelocity(0) to use).
 void fluidSolver_t::updateMixtureForcing()
 {
   if (o_alpha_phases.empty()) {
@@ -328,20 +371,36 @@ void fluidSolver_t::updateMixtureForcing()
     return;
   }
 
-  // o_JwF_phases[k] (sumMakef's output) is ALREADY density-free -- confirmed by reading
-  // sumMakef.okl: RHO is passed in but never referenced in the kernel body; density is
-  // applied downstream, at the point of use (velocityRhsHex3D multiplies by RHO explicitly;
-  // pressureRhsHex3D adds BF/o_JwF with NO density factor at all, iRHO=1/rho_bar only
-  // multiplies the separate viscous-stress correction term). So eq 99's density-free sum is
-  // exactly sum_k alpha_k*o_JwF_phases[k] -- no rho_k division or rho_bar rescaling needed.
-  // (An earlier version of this function incorrectly assumed o_JwF_phases[k] was rho_k-scaled
-  // and divided it out before rescaling by rho_bar -- see [[03_derivation_vs_code_log]].)
-  platform->linAlg->fill(fieldOffsetSum, 0.0, o_JwF);
+  // BDF part: from o_U's OWN (correctly historical, see updateMixtureVelocity) lag history --
+  // NOT alpha-reweighted. Plan J fixed a bug here: this used to come from
+  // Sum_k alpha_k^{n+1}*o_JwF_phases[k] (today's alpha applied to each phase's ALREADY
+  // BDF+ADV-combined forcing), which wrongly re-weighted the BDF part with today's alpha too.
+  combineLagLevels(o_coeffBDF, o_U, static_cast<int>(o_coeffBDF.size()), o_JwF);
+  platform->linAlg->scale(fieldOffsetSum, 1.0 / dt[0], o_JwF);
+
+  // "+g" part: Sum_k alpha_k^{n+1} * [EXT-combined o_EXT_phases[k]] (userSource's own
+  // gravity/drag/forcing history, built in makeExplicit()/initInnerStep, same EXT-coefficient
+  // treatment as the ADV part below but ADDED, matching sumMakef.okl's own
+  // "nltx += JW*coeffEXT[s]*FU[...]" convention for this term).
+  {
+    const auto nEXT = static_cast<int>(o_coeffEXT.size());
+    for (int k = 0; k < Nphase; k++) {
+      auto o_extK = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+      combineLagLevels(o_coeffEXT, o_EXT_phases[k], nEXT, o_extK);
+      platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_alpha_phases[k], o_extK); // *= alpha_k
+      platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, 1.0, o_extK, 1.0, o_JwF);
+    }
+  }
+
+  // ADV part: Sum_k alpha_k^{n+1} * [Sum_q b_q*(u_k.grad(u_k))^{n-q}] -- each phase's OWN
+  // o_ADV_phases[k] lag history (built in makeForcing()/initInnerStep), EXT-combined BEFORE
+  // alpha-weighting, not the already-BDF+ADV-combined o_JwF_phases[k].
+  const auto nEXT = static_cast<int>(o_coeffEXT.size());
   for (int k = 0; k < Nphase; k++) {
-    auto o_term = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
-    o_term.copyFrom(o_JwF_phases[k], fieldOffsetSum);
-    platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_alpha_phases[k], o_term); // *= alpha_k
-    platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, 1.0, o_term, 1.0, o_JwF);
+    auto o_advK = platform->deviceMemoryPool.reserve<dfloat>(fieldOffsetSum);
+    combineLagLevels(o_coeffEXT, o_ADV_phases[k], nEXT, o_advK);
+    platform->linAlg->axmyVector(mesh->Nlocal, fieldOffset, 0, 1.0, o_alpha_phases[k], o_advK); // *= alpha_k
+    platform->linAlg->axpbyMany(mesh->Nlocal, mesh->dim, fieldOffset, -1.0, o_advK, 1.0, o_JwF);
   }
 }
 
@@ -484,6 +543,34 @@ void fluidSolver_t::solvePressure(double time, int stage)
     launchKernel("fluidSolver_t::pressureAddQtl", mesh->Nlocal, mesh->o_LMM, g0idt, o_div, o_pRhs);
     flopCount += 3 * mesh->Nlocal;
 
+    // Plan K's (v2,105) "lagged Q_bar" term -- REMOVED (Plan M finding, wk_claude/plans/
+    // M_manufactured_profile_staged_freeze_debug.md). Re-deriving eq 105->106->108: the
+    // OCR'd "Sum_q a_q*Q_bar_k^{n-q}/dt" in eq 105 is a mis-read of "Sum_q a_q*u_bar^{n-q}
+    // /dt" (bold u-bar, the VELOCITY vector, confirmed unambiguously by eq 106's own
+    // rendering of the identical bracket using u_bar). That term is NOT an independent
+    // scalar source (f,q)_Omega needing its own Qtl-style addition -- it is a VECTOR folded
+    // into the gradient-type weak form (f,grad(q))_Omega, the same bucket as advection/
+    // gravity, whose boundary-flux counterterm cancels out via the pressure-BC substitution
+    // (eq 107) in the final eq 108, leaving only the existing (n.u_bar^{n+1}) boundary term
+    // (divergenceSurfaceHex3D below, using TODAY's o_U, already correct).
+    // updateMixtureForcing() (Plan J, pre-existing) ALREADY computes this exact quantity
+    // correctly via that same gradient route: its "BDF part" is
+    // combineLagLevels(o_coeffBDF, o_U, ..., o_JwF); scale(1/dt[0], o_JwF) -- i.e.
+    // Sum_q a_q*u_bar^{n-q}/dt, fed into o_JwF -> pressureRhsHex3D ->
+    // core-wDivergenceVolumeHex3D, the correct (f,grad(q))_Omega assembly with boundary
+    // handling already covered by divergenceSurfaceHex3D.
+    // This block instead took the DIVERGENCE of that same quantity and injected it as a
+    // second, separately-discretized scalar source via pressureAddQtl (missing its own
+    // boundary term) -- a duplicate of a term already present, not a missing one. case1's
+    // bit-identical regression never caught this because case1 has alpha_d=0 exactly, so
+    // u_bar=u_c has near-zero divergence throughout (ordinary single-phase guarantee),
+    // making this term's own divergence numerically negligible there regardless of sign --
+    // not because it was correct. Confirmed via Plan M's L1a/L0 staged-freeze tests:
+    // divUErr grew linearly (not flat) once alpha had real spatial structure AND velocity
+    // genuinely evolved, consistent with this redundant term's own magnitude scaling with
+    // however much Q_bar had already drifted (self-reinforcing bias, not exponential
+    // instability).
+
     launchKernel("fluidSolver_t::divergenceSurfaceHex3D",
                  mesh->Nelements,
                  mesh->o_sgeo,
@@ -495,6 +582,16 @@ void fluidSolver_t::solvePressure(double time, int stage)
                  o_U,
                  o_pRhs);
     flopCount += 25 * static_cast<double>(mesh->Nelements) * mesh->Nq * mesh->Nq;
+
+    // (v2, 105)'s RED term, UDF-opt-in (see fluidSolver.hpp's own comment on userRedTerm --
+    // not implemented by default, same documented gap as always).
+    if (userRedTerm) {
+      auto o_redTerm = userRedTerm(time);
+      if (o_redTerm.isInitialized()) {
+        launchKernel("fluidSolver_t::pressureAddQtl", mesh->Nlocal, mesh->o_LMM, -1.0, o_redTerm, o_pRhs);
+        flopCount += 3 * mesh->Nlocal;
+      }
+    }
 
     if (o_rhoSplitTerm.isInitialized()) {
       platform->linAlg->axpby(mesh->Nlocal, -1.0, o_rhoSplitTerm, 1.0, o_pRhs);

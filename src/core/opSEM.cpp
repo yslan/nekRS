@@ -61,8 +61,15 @@ void strongGradVec(mesh_t *mesh, dlong offset, const occa::memory &o_in, occa::m
 
 occa::memory strongGradVec(mesh_t *mesh, dlong offset, const occa::memory &o_in, bool avg)
 {
+  // BUG FIX (found this session, unused anywhere else -- confirmed via grep, no regression
+  // risk): the 4-arg strongGradVec() above already calls strongGrad(..., avg) per
+  // component, which itself runs runAvg() internally when avg=true -- so passing avg=true
+  // straight through here, then ALSO calling runAvg() again on the whole output, summed
+  // (oogs ogsAdd) and normalized (invAJw) the SAME data twice, inflating it by roughly the
+  // node-sharing multiplicity. Compute raw (avg=false) internally; this function's own
+  // runAvg call below is the only pairing.
   poolDeviceMemory<dfloat> o_out(mesh->dim * mesh->dim * offset);
-  strongGradVec(mesh, offset, o_in, o_out, avg);
+  strongGradVec(mesh, offset, o_in, o_out, false);
   if (avg) runAvg(mesh, o_out, offset, mesh->dim * mesh->dim);
   return o_out;
 }
@@ -110,8 +117,12 @@ void laplacian(mesh_t *mesh,
                const occa::memory &o_in,
                occa::memory &o_out)
 {
+  // BUG FIX (found this session, unused anywhere else -- confirmed via grep, no regression
+  // risk): this condition was inverted (allocates only when ALREADY initialized, which
+  // never happens for a static local starting uninitialized), so o_fieldOffsetScan was
+  // permanently uninitialized/empty and passed to the kernel as-is.
   static occa::memory o_fieldOffsetScan;
-  if (o_fieldOffsetScan.isInitialized()) {
+  if (!o_fieldOffsetScan.isInitialized()) {
     o_fieldOffsetScan = platform->device.malloc<dlong>(1);
   }
   launchKernel(section + "weakLaplacian" + suffix,
@@ -138,14 +149,24 @@ void strongLaplacian(mesh_t *mesh,
                      const occa::memory &o_in,
                      occa::memory &o_out, bool avg)
 {
-  auto o_grad = strongGrad(mesh, offset, o_in, avg);
+  // BUG FIX (found this session, unused anywhere else -- confirmed via grep, no regression
+  // risk): with avg=true (the default), strongGrad() below already performs its own
+  // runAvg() internally (oogs ogsAdd sum + invAJw normalize) -- the EXPLICIT
+  // oogs::startFinish() right after summed that ALREADY-normalized field AGAIN, with no
+  // compensating divide, inflating it by roughly the node-sharing multiplicity (same for
+  // strongDivergence()'s own internal runAvg + the explicit "if (avg) runAvg(...)" at the
+  // end). Caught by a case2.udf RED-term (eq 105) experiment going from healthy to
+  // resNorm0~1e9 within 2 steps. Compute both stages raw (avg=false) internally; the
+  // explicit oogs/invAJw sequence already written below, and the final runAvg, are each
+  // meant to be the ONLY pairing for their stage.
+  auto o_grad = strongGrad(mesh, offset, o_in, false);
   oogs::startFinish(o_grad, mesh->dim, offset, ogsDfloat, ogsAdd, mesh->oogs);
 
   auto o_tmp = platform->deviceMemoryPool.reserve<dfloat>(mesh->Nlocal);
   platform->linAlg->axmyz(mesh->Nlocal, 1.0, mesh->o_invAJw, o_lambda, o_tmp);
   platform->linAlg->axmyVector(mesh->Nlocal, offset, 0, 1.0, o_tmp, o_grad);
 
-  o_out = strongDivergence(mesh, offset, o_grad, avg);
+  o_out = strongDivergence(mesh, offset, o_grad, false);
   if (avg) runAvg(mesh, o_out, 0, 1);
 }
 
