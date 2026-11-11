@@ -269,17 +269,23 @@ void UDF_Setup()
   }
 
   // [fieldExtract] one line along the flow direction (x), sampled at the cross-section
-  // centerline, reproducing the spirit of Fig. 2/3 of trans_v116_n1_pp1251-1254.pdf for this
-  // case. Validation/plotting happens entirely in Python (read_case2.py) -- this UDF only
-  // samples and writes.
+  // centerline, reproducing the spirit of Fig. 2/3/4 of trans_v116_n1_pp1251-1254.pdf for
+  // this case. Validation/plotting happens entirely in Python (read_case2.py) -- this UDF
+  // only samples and writes. "mixture"/"pressure" are fluidSolver_t::o_solution()'s own
+  // special-case keys (fluidSolver.hpp) for the shared (not per-phase) mixture velocity
+  // (o_U, Fig. 2's "Mixture" curve) and mixture pressure (o_P, Fig. 4) fields.
   {
     std::vector<int> boxDims = {81, 1, 1}; // npts in X, Y, Z (endpoints included)
     std::vector<fieldExtract::field> fldList;
     deviceMemory<dfloat> o_uc(fluid->o_solution("phase0").slice(0, fluid->fieldOffset));
     deviceMemory<dfloat> o_ud(fluid->o_solution("phase1").slice(0, fluid->fieldOffset));
+    deviceMemory<dfloat> o_um(fluid->o_solution("mixture").slice(0, fluid->fieldOffset));
+    deviceMemory<dfloat> o_p(fluid->o_solution("pressure").slice(0, fluid->fieldOffset));
     deviceMemory<dfloat> o_ad(nrs->scalar->o_solution("alphad"));
     fldList.push_back({"uc", std::vector{o_uc}});
     fldList.push_back({"ud", std::vector{o_ud}});
+    fldList.push_back({"um", std::vector{o_um}});
+    fldList.push_back({"p", std::vector{o_p}});
     fldList.push_back({"alphad", std::vector{o_ad}});
 
     std::array<dfloat, 3> x0 = {0.0, 0.05, 0.05};

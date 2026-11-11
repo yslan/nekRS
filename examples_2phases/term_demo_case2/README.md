@@ -21,15 +21,31 @@ scalar (`[SCALAR alphad]`, Plan G mechanism) and fed back into the fluid solver'
 from the inlet state toward the paper's independently-computed fully-developed state
 (Table III) under gravity + drag.
 
-**Template substitution (read before trusting any C_D-dependent number here):** the paper's
-text says this case "includes the effect of... a variable drag coefficient" but the 4 pages
-available do not give the actual `C_D(Re_d)` correlation used. `case2.udf`'s
-`dragGravityKernel` substitutes the standard **Schiller-Naumann** correlation,
-`C_D = (24/Re_d)(1 + 0.15 Re_d^0.687)`, clipped to Stokes drag at very small `Re_d` and
-capped at `C_D=400`. `Re_d` is formed against `[FLUID VELOCITY] viscosity = 1e-4`, which is
-itself only a numerical regularizer (the paper's own momentum equations have no diffusion
-term). This is a demonstration of how a variable-C_D drag law gets wired into `userSource`,
-**not** a reproduction of the paper's own (unpublished-in-these-4-pages) curve.
+**Drag law (read before trusting any C_D-dependent number here):** the paper's text says this
+case "includes the effect of... a variable drag coefficient" but the 4 pages available do not
+give the actual `C_D(Re_d)` correlation used. Three drag-law variants were tried and are kept
+side by side as standalone cases (`case2_dragA/B/C.udf`/`.par`, each at the stable
+`viscosity=1e-2`) -- see **`wk_claude/notes/08_case2_drag_law_attempts.md`**
+(`case2_drag_law_attempts.pdf` in this directory is a frozen PDF export of that note) for the
+full writeup with formulas and figures:
+
+- **`case2_dragA`** (= production `case2.udf`/`case2.par`): Schiller-Naumann,
+  `C_D = (24/Re_d)(1+0.15 Re_d^0.687)`, with a reference viscosity `NU_C=1e-4` that is just a
+  round number, decoupled from `[FLUID VELOCITY] viscosity`. Outlet rel. error vs Table III:
+  `u_c` 5.6%, `u_d` 50.5%, `alpha_d` 33.6%.
+- **`case2_dragB`**: this project's own `wk_claude/two_phase_flow_equations_AT-2.pdf` closure
+  (same Schiller-Naumann form plus a high-`Re` plateau), `NU_C` tied to the real
+  `[FLUID VELOCITY] viscosity = 1e-2`. Outlet rel. error: `u_c` 0.4%, `u_d` 2.5%, `alpha_d` 2.5%.
+- **`case2_dragC`**: the **Ishii-Zuber (1979)** correlation,
+  `C_D = (24/Re_d)(1+0.1 Re_d^0.75)`, `NU_C=1e-2` -- sourced from D. Shaver's own later paper
+  describing Nek-2P's actual drag closure
+  (`wk_claude/shaver_2021_helical_coil_nek2p_OSTI1607420.pdf`). Outlet rel. error: `u_c` 0.02%,
+  `u_d` 0.16%, `alpha_d` 0.13% -- visually indistinguishable from Table III in Figs. 2-4. This
+  is very likely the paper's actual (never explicitly published in these 4 pages) correlation.
+
+All three keep a `computeRedTerm` function present but commented out/unregistered (the
+`(v2,105)` RED term, tested repeatedly and found to have no effect on the Gibbs-type
+instability regardless of drag law).
 
 ## Current default configuration (read this first)
 
@@ -38,12 +54,13 @@ is always derived, never independently solved. Stability required raising **velo
 viscosity (not `alpha_d`'s own diffusivity) to `1e-2`, with a correspondingly small
 `dt=2.5e-5`; `alpha_d` itself keeps a small `diffusionCoeff=1e-4` plus AVM regularization.
 Confirmed stable (flat `divUErr`) through `T=8` (`numSteps=320000`). The outlet state
-reaches its own steady value by `t<1` and does not change out to `t=8`; it differs from the
-paper's Table III because this case substitutes a different (Schiller-Naumann) drag
-correlation than the paper's own unpublished one, not because of insufficient run time --
-see "UPDATE: this configuration is now the production default" near the end of this file for
-the full writeup, including one recorded (non-fatal, self-recovering) transient `divUErr`
-spike.
+reaches its own steady value by `t<1` and does not change out to `t=8`; the gap vs. the
+paper's Table III is a drag-law mismatch (see above), not insufficient run time -- see
+"UPDATE: this configuration is now the production default" near the end of this file for the
+full writeup, including one recorded (non-fatal, self-recovering) transient `divUErr` spike.
+Production (`case2.udf`/`case2.par`) still uses the `case2_dragA` (Schiller-Naumann) drag
+law; `case2_dragC` (Ishii-Zuber) gives a far more accurate match to Table III at the same
+stability/settings and is a candidate for a future default, not yet promoted.
 
 ## Files
 
@@ -498,4 +515,71 @@ outlet matches the inlet value to all printed digits for both phases (`0.7917`/`
 exactly satisfying eq 14/15's steady-state constraint `d(alpha_k*u_k)/dz=0`.
 
 `case2_fig_comparison.png` and `case2_fig_timehistory.png` were regenerated from this T=8
-production run.
+production run. (Later superseded by a T=2 run, see "UPDATE: reduced default run duration"
+below -- same steady state, cheaper to regenerate.)
+
+### UPDATE: reduced default run duration to T=2
+
+The T=8 run above confirmed the outlet state is bit-identical from t=2 through t=8, so T=8
+added confidence in long-term stability but no additional accuracy. `case2.par`'s default
+was reduced to `numSteps=80000` (T=2, `ioSample=2000`) for a ~4x cheaper regenerate-the-plots
+cycle; the T=8 finding itself remains valid and is kept above for the record.
+
+### UPDATE: Figs. 2/3/4 analogs, and the AT-2 drag law brings quantitative agreement with Table III
+
+`plot_case2_figs234.py` reproduces the LAYOUT of Shaver's own Figs. 2 (velocities, including
+the **mass-weighted** mixture velocity -- see the script's own docstring: fluidSolver_t's
+`"mixture"` field is the volume-weighted average, eq 81, which is trivially the conserved
+total volumetric flux for this constant-density-per-phase case and is NOT what Table III's
+`u_m` or Fig. 2's "Mixture" curve actually are), 3 (volume fractions), and 4 (mixture
+pressure, shifted so the outlet is 0, matching the paper's own convention). Takes `[vts_dir]
+[label]` args so it can plot any run's dumps into distinctly-named files without touching
+the production `case2_fig*.png`.
+
+With the production drag law (Schiller-Naumann, `NU_C=1e-4` decoupled from the solver's real
+viscosity), the three plots have the right qualitative shape/direction as Figs. 2-4 but don't
+quantitatively land on Table III (5.6%/50.5%/33.6% relative error in `u_c`/`u_d`/`alpha_d`).
+
+**Back-solving Table III's own force balance reveals why, and how to fix it.** At the
+fully-developed point (`du_c/dz=du_d/dz=0`), eq 16+19 reduce to
+`(alpha_d/alpha_c)*F_d = g*(rho_m-rho_c)/rho_c`, which can be solved directly for Table III's
+own implied drag: **`C_D~2.15` at `Re~27`** (using the same Schiller-Naumann form). Re~27 is
+nowhere near the `Re>=1000` regime -- so the missing high-`Re` branch of AT-2's own two-part
+correlation (`two_phase_flow_equations_AT-2.pdf`, this project's OWN foundational numerics
+reference, eq 98-100 -- same low-`Re` Schiller-Naumann form we already use, PLUS a constant
+`C_D=0.44` plateau for `Re>=1000`) turns out not to be the dominant issue here. The dominant
+issue is simpler: our hardcoded `NU_C=1e-4` reference viscosity gives `Re~6000` at the actual
+operating point (~80x too large), collapsing `C_D` to ~0.24 (vs. the needed ~2.15) -- far too
+little drag, which is exactly why `u_d` ran away to 2.09 instead of stopping near 1.386.
+
+**Fix, in a new file (`dbg/case2_at2drag.*`, NOT the production `case2.udf`/`case2.par`):**
+implement AT-2's full two-branch `C_D(Re)` (adds the `Re>=1000` plateau, for completeness),
+and set `NU_C` to the solver's own actual `[FLUID VELOCITY] viscosity` (`1e-2`) instead of a
+decoupled constant, per AT-2 eq 99's own prescription that `Re` uses the real continuous-
+phase viscosity. (`1e-2` was not picked to hit this target -- it's the same value already
+used for the unrelated Plan M stabilization fix, and happens to be close to the back-solved
+`~8.3e-3` implied by Table III, which is itself a good sign this is the right reference
+value.) Same mesh/dt/T=2 as the production run otherwise.
+
+**Result: dramatic improvement.**
+
+| | `u_c` | `u_d` | `alpha_d` |
+|---|---|---|---|
+| Table III (FD) | 0.9318 | 1.386 | 0.1504 |
+| Production drag law (`case2.udf`) | 0.8795 (5.6%) | 2.0854 (50.5%) | 0.0999 (33.6%) |
+| AT-2 drag law (`dbg/case2_at2drag.udf`) | 0.9359 (0.4%) | 1.3519 (2.5%) | 0.1541 (2.5%) |
+
+(percentages are relative error vs. Table III). `case2_fig{2,3,4}_*_at2drag.png` show the
+AT-2-drag-law run landing almost exactly on Table III's dashed reference lines, closely
+matching Shaver's own Figs. 2-4 both in shape AND magnitude -- unlike the production
+drag law's plots, which only match in shape. This strongly suggests AT-2 eq 98-100,
+with `Re` against the real continuous-phase viscosity, is indeed close to (or the same as)
+Nek-2P's own actual drag closure -- i.e. Shaver's paper's "unpublished" correlation may not
+be unpublished at all, just documented in a separate reference (AT-2) from the 4-page paper.
+
+Not yet done: porting this drag-law fix into the production `case2.udf`/`case2.par` (kept
+separate per the user's request, to compare before/after cleanly); re-validating the Plan
+M/N stability finding specifically for this corrected drag law at longer run durations;
+re-checking whether `CD_MAX=400`'s ceiling ever actually binds for this drag law (it does
+not appear to, in either variant, at the Re this flow reaches, per the spot-check in this
+session, but this was not exhaustively swept).

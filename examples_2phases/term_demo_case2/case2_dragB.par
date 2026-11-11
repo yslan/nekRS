@@ -1,0 +1,98 @@
+userSections = CASEDATA
+
+[GENERAL]
+# Plan M/N (wk_claude/plans/M_*.md, N_*.md; see case2.udf's header comment and README.md's
+# full history): a staged debugging campaign found and fixed a genuine duplicate-term bug in
+# fluidSolver.cpp's solvePressure() (Plan N), which exposed a separate, genuine (dt-
+# independent) alpha_d/velocity feedback instability (Gibbs-type ringing at the inlet). Of
+# everything tried to regularize it (AVM/HPFRT/GJP on alpha_d alone, the eq-105 RED term,
+# larger alpha_d diffusivity alone), only raising the VELOCITY equations' own `viscosity` to
+# 1e-2 -- paired with a correspondingly smaller dt to resolve the now-stiffer diffusion --
+# achieved genuine, flat stabilization (not just a delayed blowup). alpha_d keeps its
+# original small diffusionCoeff (below) plus AVM, which gave the best accuracy of everything
+# tested (AVM's dissipation only activates where it detects real noise, e.g. right at the
+# inlet, rather than diffusing alpha_d everywhere the way a larger diffusionCoeff would).
+# numSteps/dt below (T=2) extends the T=1.0 duration this configuration was first validated
+# stable (flat, monotonically DECREASING divUErr) at. A T=8 run (320000 steps) was also
+# completed and confirmed stable throughout (one recorded non-fatal transient divUErr spike
+# at t~0.68, see README.md), but its outlet state was bit-identical from t=2 through t=8 --
+# i.e. T=2 is already past where this configuration's steady state is reached, so T=8 added
+# confidence in long-term stability but no additional accuracy. T=2 is kept as the default
+# for a cheaper regenerate-the-plots cycle; T=8's stability finding remains documented in
+# README.md. The outlet gap vs. Table III is a drag-law model mismatch, not insufficient run
+# time -- see README.md's "AT-2 drag law" section.
+# Mechanism: solve ONLY alphad (eq 15, via u_d); alphac is ALWAYS derived as 1-alphad in
+# case2.udf's myPreFluid (outperformed Plan K/L's retries #2/#3/#4a/#4b that also solved
+# alphac independently -- see README.md's retries table).
+polynomialOrder = 7
+numSteps = 80000
+dt = 2.5e-5
+timeStepper = tombo3
+checkpointInterval = 80000
+scalars = alphad
+
+[FLUID PRESSURE]
+residualTol = 1e-06
+
+[FLUID VELOCITY]
+# bID1 = inlet (x=0), bID2 = outlet (x=1), bID3 = symmetry (y=0/0.1); boundaryID is
+# assigned from cbc in case2.usr's usrdat2 -- genbox's "E"/"SYM" letters alone do not
+# become real boundary IDs. See case2.box/case2.usr.
+boundaryTypeMap = udfDirichlet, zeroNeumann, zeroDirichletY/zeroNeumann
+preconditioner = JACOBI
+# 1e-2, NOT the paper's (nonexistent, per Table I) physical value -- a genuine stabilizer
+# found by Plan M, see the [GENERAL] comment above.
+viscosity = 1e-2
+residualTol = 1e-08
+phases = phase0, phase1
+
+# phase0 = continuous (Shaver et al. "c"): rho_c = 1.0, u_c = 1 and alpha_c = 0.7917 at
+# inlet (Table II), accelerates/decelerates toward the fully-developed state (Table III)
+# under gravity + variable-C_D drag reaction (userSource in case2.udf -- see Table I/II/III,
+# eq 14-19 of trans_v116_n1_pp1251-1254.pdf).
+[FLUID PHASE phase0]
+# Explicit (not just inherited) -- must match [FLUID VELOCITY]'s boundaryTypeMap exactly;
+# fluidSolver_t::setupEllipticSolver() hard-refuses if a phase's own BOUNDARY TYPE MAP
+# option differs from the mixture's (mixed BC per phase isn't supported). The INI-level
+# phase-inherits-from-mixture merge (parseFluidPhaseSections) did not reliably propagate
+# this for a 3-entry map in testing here, so it's spelled out explicitly instead.
+boundaryTypeMap = udfDirichlet, zeroNeumann, zeroDirichletY/zeroNeumann
+rho = 1.0
+
+# phase1 = dispersed (Shaver et al. "d"): rho_d = 0.2, D_d = 0.5, u_d = 1 and
+# alpha_d = 0.2083 at inlet (Table II). Unlike case1, alpha_d genuinely evolves here --
+# transported via the alphad scalar below (Plan G mechanism).
+[FLUID PHASE phase1]
+# Explicit, must match [FLUID VELOCITY] exactly -- see phase0's comment above.
+boundaryTypeMap = udfDirichlet, zeroNeumann, zeroDirichletY/zeroNeumann
+rho = 0.2
+
+# Plan G alpha-transport scalar for phase1 (dispersed), eq 90's dilation term supplied via
+# case2.udf's alphaDilationImplicit (scalar_t::userImplicitLinearTerm). "phase = phase1" is
+# consumed by parseScalar.hpp into "SCALAR<n> ALPHA PHASE", read by nrs.cpp to pick this
+# scalar's own convecting velocity (fluid->o_relUrst_phases[1]) for its advection.
+# diffusionCoeff is a small artificial numerical diffusivity (the paper's own alpha
+# transport, eq 15, has no diffusion term); regularization=avm adds targeted, localized
+# dissipation only where real noise is detected (see [GENERAL] comment) -- found to be both
+# necessary (for genuine stability, jointly with [FLUID VELOCITY]'s viscosity above) and the
+# most accurate of everything tried (vs. e.g. a uniformly larger diffusionCoeff everywhere).
+# alphac is NOT solved as its own scalar -- it's always derived as 1-alphad (case2.udf's
+# myPreFluid), which outperformed Plan K/L's retries that solved it independently (see
+# README.md's retries table).
+[SCALAR alphad]
+phase = phase1
+diffusionCoeff = 1e-4
+regularization = avm+noiseThreshold=1e-3
+# Same 3 boundary IDs as [FLUID VELOCITY] (shared mesh boundaryID array, assigned in
+# case2.usr): inlet Dirichlet, outlet zero-flux, symmetry zero-flux (no lateral alpha
+# gradient expected across the SYM sides).
+boundaryTypeMap = udfDirichlet, zeroNeumann, zeroNeumann
+residualTol = 1e-08
+
+[CASEDATA]
+# fieldExtract sampling cadence (in steps) -- read in case2.udf via platform->par->extract
+# and used as the "tstep % ioSample == 0" guard in UDF_ExecuteStep. numSteps=80000 /
+# ioSample=2000 gives 40 .vts dumps total. T=2 (not T=8): the outlet state was already
+# confirmed bit-identical from t=2 through t=8 in the earlier T=8 run, so T=2 is sufficient
+# and ~4x cheaper.
+ioSample = 2000

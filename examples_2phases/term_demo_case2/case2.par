@@ -12,24 +12,23 @@ userSections = CASEDATA
 # original small diffusionCoeff (below) plus AVM, which gave the best accuracy of everything
 # tested (AVM's dissipation only activates where it detects real noise, e.g. right at the
 # inlet, rather than diffusing alpha_d everywhere the way a larger diffusionCoeff would).
-# numSteps/dt below (T=8) extends the T=1.0 duration this configuration was first validated
-# stable (flat, monotonically DECREASING divUErr) at; divUErr's decreasing trend through
-# T=1.0 is itself evidence of genuine asymptotic stability (not just absence-of-blowup-yet),
-# so T=8 was chosen as the next checkpoint rather than re-deriving T=1.0's result. T=8 is
-# also the duration needed for u_d/alpha_d (unlike u_c, these start far from their
-# fully-developed values and take real transit time to get there) to approach something
-# comparable to the paper's own Fig. 2/3 -- see read_case2.py's printed error table: at
-# T=1.0 u_c is already close (5.6% off) but u_d/alpha_d are still mostly transient (34-51%
-# off), NOT a numerics problem (divUErr/resNorm stay tiny throughout) but a time-convergence
-# one. T=32 (the old default's full target) is a further follow-up, not assumed necessary.
+# numSteps/dt below (T=2) extends the T=1.0 duration this configuration was first validated
+# stable (flat, monotonically DECREASING divUErr) at. A T=8 run (320000 steps) was also
+# completed and confirmed stable throughout (one recorded non-fatal transient divUErr spike
+# at t~0.68, see README.md), but its outlet state was bit-identical from t=2 through t=8 --
+# i.e. T=2 is already past where this configuration's steady state is reached, so T=8 added
+# confidence in long-term stability but no additional accuracy. T=2 is kept as the default
+# for a cheaper regenerate-the-plots cycle; T=8's stability finding remains documented in
+# README.md. The outlet gap vs. Table III is a drag-law model mismatch, not insufficient run
+# time -- see README.md's "AT-2 drag law" section.
 # Mechanism: solve ONLY alphad (eq 15, via u_d); alphac is ALWAYS derived as 1-alphad in
 # case2.udf's myPreFluid (outperformed Plan K/L's retries #2/#3/#4a/#4b that also solved
 # alphac independently -- see README.md's retries table).
 polynomialOrder = 7
-numSteps = 320000
+numSteps = 80000
 dt = 2.5e-5
 timeStepper = tombo3
-checkpointInterval = 320000
+checkpointInterval = 80000
 scalars = alphad
 
 [FLUID PRESSURE]
@@ -92,6 +91,8 @@ residualTol = 1e-08
 
 [CASEDATA]
 # fieldExtract sampling cadence (in steps) -- read in case2.udf via platform->par->extract
-# and used as the "tstep % ioSample == 0" guard in UDF_ExecuteStep. numSteps=320000 /
-# ioSample=8000 gives 40 .vts dumps total.
-ioSample = 8000
+# and used as the "tstep % ioSample == 0" guard in UDF_ExecuteStep. numSteps=80000 /
+# ioSample=2000 gives 40 .vts dumps total. T=2 (not T=8): the outlet state was already
+# confirmed bit-identical from t=2 through t=8 in the earlier T=8 run, so T=2 is sufficient
+# and ~4x cheaper.
+ioSample = 2000
